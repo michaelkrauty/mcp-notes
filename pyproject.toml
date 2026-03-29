@@ -1,0 +1,73 @@
+[project]
+name = "mcp-notes"
+version = "1.0.0"
+description = "MCP server for semantic note management with vector search"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "michaelkrauty" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp~=1.25.0",
+    "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.0.0",
+    "pyyaml~=6.0",
+    "gitpython~=3.1",
+    "pydantic~=2.0",
+    "pydantic-settings~=2.0",
+    "qdrant-client~=1.16.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/michaelkrauty/mcp-notes"
+Repository = "https://github.com/michaelkrauty/mcp-notes"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.12.0",
+    "pytest-cov>=7.0.0",
+    "hypothesis>=6.100.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+    "types-PyYAML>=6.0.0",
+]
+
+[project.scripts]
+mcp-notes = "mcp_notes.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_notes"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.uv.sources]
+vector-core = { git = "https://github.com/michaelkrauty/vector-core", tag = "v1.0.0" }
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+strict_optional = true
+show_error_codes = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "PL"]
+ignore = ["PLR0913", "PLR2004"]

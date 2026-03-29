@@ -1,0 +1,1 @@
+# mcp-notes test suite

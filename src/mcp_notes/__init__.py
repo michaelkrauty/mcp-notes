@@ -1,0 +1,13 @@
+"""MCP server for semantic note management."""
+
+__version__ = "1.0.0"
+
+
+def main() -> None:
+    """Run the MCP server."""
+    from mcp_notes.__main__ import main as _main
+
+    _main()
+
+
+__all__ = ["main", "__version__"]
