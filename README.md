@@ -15,8 +15,8 @@ MCP server for personal knowledge management with semantic search, git versionin
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.0.0
-pip install git+https://github.com/michaelkrauty/mcp-notes.git@v1.0.0
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.0.3
+pip install git+https://github.com/michaelkrauty/mcp-notes.git
 ```
 
 Or clone both repos and install locally:

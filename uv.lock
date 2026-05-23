@@ -579,7 +579,7 @@ requires-dist = [
     { name = "qdrant-client", specifier = "~=1.16.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.0.0" },
+    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.0.3" },
 ]
 provides-extras = ["dev"]
 
@@ -1253,8 +1253,8 @@ wheels = [
 
 [[package]]
 name = "vector-core"
-version = "1.0.0"
-source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.0.0#b857cf05b26ed03099afc339a2be79e35bcfb83c" }
+version = "1.0.3"
+source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.0.3#fd8cfe850f61cfb3cda482575ee7c2ce04106e9c" }
 dependencies = [
     { name = "httpx" },
     { name = "pathspec" },
