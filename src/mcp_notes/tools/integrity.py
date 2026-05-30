@@ -28,12 +28,20 @@ async def get_facts_with_stale_sources(
     Useful for identifying facts that may need review or re-verification.
 
     Args:
-        status: Filter by source status: "deleted", "modified", or "all"
+        status: Filter by source status: "deleted", "modified", or "all" (default)
         limit: Max results (default 50, max 100)
 
     Returns:
-        List of facts with stale sources
+        List of facts with stale sources, or a single-item list with an error
+        dict if status is not one of the supported values.
     """
+    valid_statuses = ("deleted", "modified", "all")
+    if status not in valid_statuses:
+        return [error_response(
+            ErrorCode.INVALID_INPUT,
+            f"Invalid status: {status}. Valid values: {', '.join(valid_statuses)}",
+        )]
+
     integrity = get_integrity_manager()
     limit = validate_limit(limit, default=50)
 

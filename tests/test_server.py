@@ -8,6 +8,7 @@ from mcp_notes.server import (
     cleanup_async_resources,
     create_note,
     delete_note,
+    get_facts_with_stale_sources,
     get_git,
     get_indexer,
     get_links,
@@ -398,6 +399,68 @@ class TestListNotes:
         for r in results:
             if r.get("category"):
                 assert r["category"].startswith("work")
+
+    @pytest.mark.asyncio
+    async def test_list_notes_invalid_sort_by(self, tmp_notes_dir):
+        """An unsupported sort_by returns a clear error instead of silently not sorting."""
+        result = await list_notes(sort_by="date")
+        assert len(result) == 1
+        assert result[0]["error_code"] == "invalid_input"
+        assert "sort_by" in result[0]["message"]
+        # Lists every supported value so the caller can correct itself
+        assert "modified, created, title" in result[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_notes_invalid_sort_by_fails_fast(self, monkeypatch):
+        """sort_by is validated before any store access (no I/O on bad input)."""
+        def boom():
+            raise AssertionError("get_store must not be called for an invalid sort_by")
+
+        monkeypatch.setattr("mcp_notes.tools.search.get_store", boom)
+        result = await list_notes(sort_by="nope")
+        assert result[0]["error_code"] == "invalid_input"
+
+    @pytest.mark.asyncio
+    async def test_list_notes_sort_by_title(self, tmp_notes_dir):
+        """A valid sort_by ('title') still sorts results ascending."""
+        await create_note(title="Banana", content="b")
+        await create_note(title="apple", content="a")
+        await create_note(title="Cherry", content="c")
+
+        results = await list_notes(sort_by="title")
+        titles = [r["title"] for r in results if "error_code" not in r]
+        assert titles == sorted(titles, key=str.lower)
+
+
+class TestGetFactsWithStaleSources:
+    """Tests for get_facts_with_stale_sources status validation."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_status(self, tmp_notes_dir):
+        """An unsupported status returns a clear error instead of an empty result."""
+        result = await get_facts_with_stale_sources(status="active")
+        assert len(result) == 1
+        assert result[0]["error_code"] == "invalid_input"
+        assert "status" in result[0]["message"]
+        # Lists every supported value so the caller can correct itself
+        assert "deleted, modified, all" in result[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_fails_fast(self, monkeypatch):
+        """status is validated before the integrity manager is accessed."""
+        def boom():
+            raise AssertionError("get_integrity_manager must not be called for invalid status")
+
+        monkeypatch.setattr("mcp_notes.tools.integrity.get_integrity_manager", boom)
+        result = await get_facts_with_stale_sources(status="nope")
+        assert result[0]["error_code"] == "invalid_input"
+
+    @pytest.mark.asyncio
+    async def test_valid_status_returns_list(self, tmp_notes_dir):
+        """A valid status ('all') passes validation and returns a list (no error)."""
+        result = await get_facts_with_stale_sources(status="all")
+        assert isinstance(result, list)
+        assert not any("error_code" in r for r in result)
 
 
 class TestListTags:

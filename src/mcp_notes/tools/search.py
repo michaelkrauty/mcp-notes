@@ -73,12 +73,20 @@ async def list_notes(
     Args:
         tags: Filter by tags (all must match)
         category: Filter by category prefix
-        sort_by: Sort field - "modified", "created", or "title"
+        sort_by: Sort field - "modified" (default), "created", or "title"
         limit: Max results (default 50, max 100)
 
     Returns:
-        List of note summaries
+        List of note summaries, or a single-item list with an error dict if
+        sort_by is not one of the supported fields.
     """
+    valid_sort_fields = ("modified", "created", "title")
+    if sort_by not in valid_sort_fields:
+        return [error_response(
+            ErrorCode.INVALID_INPUT,
+            f"Invalid sort_by: {sort_by}. Valid values: {', '.join(valid_sort_fields)}",
+        )]
+
     store = get_store()
     limit = validate_limit(limit, default=50)
 
