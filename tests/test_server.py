@@ -407,8 +407,18 @@ class TestListNotes:
         assert len(result) == 1
         assert result[0]["error_code"] == "invalid_input"
         assert "sort_by" in result[0]["message"]
-        # Lists the supported values so the caller can correct itself
-        assert "modified" in result[0]["message"]
+        # Lists every supported value so the caller can correct itself
+        assert "modified, created, title" in result[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_notes_invalid_sort_by_fails_fast(self, monkeypatch):
+        """sort_by is validated before any store access (no I/O on bad input)."""
+        def boom():
+            raise AssertionError("get_store must not be called for an invalid sort_by")
+
+        monkeypatch.setattr("mcp_notes.tools.search.get_store", boom)
+        result = await list_notes(sort_by="nope")
+        assert result[0]["error_code"] == "invalid_input"
 
     @pytest.mark.asyncio
     async def test_list_notes_sort_by_title(self, tmp_notes_dir):
@@ -432,7 +442,18 @@ class TestGetFactsWithStaleSources:
         assert len(result) == 1
         assert result[0]["error_code"] == "invalid_input"
         assert "status" in result[0]["message"]
-        assert "deleted" in result[0]["message"]
+        # Lists every supported value so the caller can correct itself
+        assert "deleted, modified, all" in result[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_fails_fast(self, monkeypatch):
+        """status is validated before the integrity manager is accessed."""
+        def boom():
+            raise AssertionError("get_integrity_manager must not be called for invalid status")
+
+        monkeypatch.setattr("mcp_notes.tools.integrity.get_integrity_manager", boom)
+        result = await get_facts_with_stale_sources(status="nope")
+        assert result[0]["error_code"] == "invalid_input"
 
     @pytest.mark.asyncio
     async def test_valid_status_returns_list(self, tmp_notes_dir):
