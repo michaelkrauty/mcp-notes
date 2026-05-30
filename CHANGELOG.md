@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.5] - 2026-05-30
+
+### Fixed
+
+- **`list_notes` now rejects an unsupported `sort_by`** instead of silently returning unsorted results. An invalid value (e.g. `sort_by="date"`) previously matched none of the sort branches and left the results in arbitrary order; it now returns a clear `invalid_input` error listing the valid fields (`modified`, `created`, `title`), matching how `list_documents` validates its enum filters in `mcp-docs`.
+- **`get_facts_with_stale_sources` now rejects an unsupported `status`** instead of silently returning an empty list. An invalid value (e.g. `status="active"`) matched neither the `deleted` nor `modified` branch and produced no facts with no explanation; it now returns a clear `invalid_input` error listing the valid values (`deleted`, `modified`, `all`).
+
 ## [1.0.4] - 2026-05-30
 
 ### Changed
