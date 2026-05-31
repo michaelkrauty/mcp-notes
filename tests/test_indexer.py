@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from vector_core import generate_point_id
+from vector_core.storage.qdrant import QdrantStorage
 
 from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.models import IndexStatus
@@ -229,6 +231,197 @@ class TestNoteIndexerIndexAll:
 
         mock_storage.delete_collection.assert_called_once()
         mock_storage.create_collection.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_index_all_partial_failure_accounting(self):
+        """Failed notes are not counted as indexed and mark the index unhealthy."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        notes = [(MagicMock(), None), (MagicMock(), None), (MagicMock(), None)]
+        for i, (parsed, _) in enumerate(notes):
+            parsed.id = UUID(int=i)
+        mock_store.iter_all.return_value = iter(notes)
+        mock_storage = AsyncMock()
+        mock_storage.collection_exists.return_value = True
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=AsyncMock(),
+            global_vocab=MagicMock(),
+        )
+
+        # Second note fails to index; first and third succeed.
+        index_note = AsyncMock(side_effect=[None, RuntimeError("boom"), None])
+        with (
+            patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
+            patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
+            patch.object(indexer, "_get_indexed_hashes", return_value={}),
+            patch.object(indexer, "_index_note", index_note),
+        ):
+            status = await indexer.index_all()
+
+        assert status.total_notes == 3
+        assert status.indexed_notes == 2  # only the two that succeeded
+        assert status.index_healthy is False
+
+    @pytest.mark.asyncio
+    async def test_index_all_all_succeed_is_healthy(self):
+        """When every note indexes, the status is healthy and counts everything."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        notes = [(MagicMock(), None), (MagicMock(), None)]
+        for i, (parsed, _) in enumerate(notes):
+            parsed.id = UUID(int=i)
+        mock_store.iter_all.return_value = iter(notes)
+        mock_storage = AsyncMock()
+        mock_storage.collection_exists.return_value = True
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=AsyncMock(),
+            global_vocab=MagicMock(),
+        )
+
+        with (
+            patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
+            patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
+            patch.object(indexer, "_get_indexed_hashes", return_value={}),
+            patch.object(indexer, "_index_note", new=AsyncMock(return_value=None)),
+        ):
+            status = await indexer.index_all()
+
+        assert status.total_notes == 2
+        assert status.indexed_notes == 2
+        assert status.index_healthy is True
+
+    @pytest.mark.asyncio
+    async def test_index_all_incremental_prunes_orphan_chunks(self):
+        """A note re-indexed via index_all (incremental) has its orphans pruned."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        parsed = MagicMock()
+        note_id = UUID("12345678-1234-5678-1234-567812345678")
+        parsed.id = note_id
+        mock_store.iter_all.return_value = iter([(parsed, None)])
+        mock_storage = AsyncMock(spec=QdrantStorage)
+        mock_storage.collection_exists.return_value = True
+        # The note previously had 4 chunks; it now has 2 -> chunks 2,3 are orphans.
+        mock_storage.scroll_points.return_value = [
+            {"chunk_index": 0},
+            {"chunk_index": 1},
+            {"chunk_index": 2},
+            {"chunk_index": 3},
+        ]
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=AsyncMock(),
+            global_vocab=MagicMock(),
+        )
+
+        with (
+            patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
+            patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
+            patch.object(indexer, "_get_indexed_hashes", return_value={}),
+            patch.object(indexer, "_index_note", new=AsyncMock(return_value=2)),
+        ):
+            await indexer.index_all()
+
+        mock_storage.delete_points.assert_called_once()
+        _, ids_arg = mock_storage.delete_points.call_args[0]
+        assert ids_arg == [
+            generate_point_id(f"chunk:{note_id}:2"),
+            generate_point_id(f"chunk:{note_id}:3"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_index_all_force_skips_orphan_pruning(self):
+        """Force mode recreates the collection, so it does not scan for orphans."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        parsed = MagicMock()
+        parsed.id = UUID(int=1)
+        mock_store.iter_all.return_value = iter([(parsed, None)])
+        mock_storage = AsyncMock(spec=QdrantStorage)
+        mock_storage.collection_exists.return_value = True
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=AsyncMock(),
+            global_vocab=MagicMock(),
+        )
+
+        with (
+            patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
+            patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
+            patch.object(indexer, "_index_note", new=AsyncMock(return_value=2)),
+        ):
+            await indexer.index_all(force=True)
+
+        mock_storage.delete_points.assert_not_called()
+        mock_storage.scroll_points.assert_not_called()
+
+
+class TestNoteIndexerDeleteOrphanChunks:
+    """Tests for _delete_orphan_chunks (pruning chunks when a note shrinks)."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_only_orphan_chunks(self):
+        """Chunks with index >= new_chunk_count are deleted by deterministic ID."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        # spec=QdrantStorage guards against delete_points disappearing from
+        # vector-core: the call would raise AttributeError if the method is gone.
+        mock_storage = AsyncMock(spec=QdrantStorage)
+        mock_storage.scroll_points.return_value = [
+            {"chunk_index": 0},
+            {"chunk_index": 1},
+            {"chunk_index": 2},
+            {"chunk_index": 3},
+        ]
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=MagicMock(),
+        )
+
+        note_id = UUID("12345678-1234-5678-1234-567812345678")
+        # New version keeps chunks 0 and 1; chunks 2 and 3 are orphans.
+        await indexer._delete_orphan_chunks(note_id, new_chunk_count=2)
+
+        mock_storage.delete_points.assert_called_once()
+        collection_arg, ids_arg = mock_storage.delete_points.call_args[0]
+        assert collection_arg == indexer.collection_name
+        assert ids_arg == [
+            generate_point_id(f"chunk:{note_id}:2"),
+            generate_point_id(f"chunk:{note_id}:3"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_delete_when_chunk_count_unchanged(self):
+        """No deletion request is made when there are no orphaned chunks."""
+        mock_store = MagicMock()
+        mock_store.base_dir = Path("/home/user/notes")
+        mock_storage = AsyncMock(spec=QdrantStorage)
+        mock_storage.scroll_points.return_value = [
+            {"chunk_index": 0},
+            {"chunk_index": 1},
+        ]
+
+        indexer = NoteIndexer(
+            note_store=mock_store,
+            storage=mock_storage,
+            embedder=MagicMock(),
+        )
+
+        await indexer._delete_orphan_chunks(UUID(int=0), new_chunk_count=2)
+
+        mock_storage.delete_points.assert_not_called()
 
 
 class TestNoteIndexerDeleteNoteIndex:
