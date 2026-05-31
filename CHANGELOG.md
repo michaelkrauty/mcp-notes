@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.6] - 2026-05-30
+
+### Fixed
+
+- **Orphaned chunks are now actually pruned when a note is re-indexed to fewer chunks.** `_delete_orphan_chunks` called `QdrantStorage.delete_points(...)`, which did not exist in `vector-core` — the resulting `AttributeError` was swallowed by the best-effort `except`, so a note that shrank from N to M chunks left its chunks `M..N-1` behind as stale, still-searchable results. `vector-core` `v1.2.0` adds `delete_points`, and the bump makes the existing cleanup path work. Additionally, the bulk `index_all` incremental path now prunes orphans after each re-index (previously only the single-note `update_note` path did), so a note edited outside the server and picked up by startup/auto-index is cleaned up too. Covered by new regression tests (including a `spec`-checked mock that fails if the method ever disappears again).
+- **`index_all` no longer reports success it didn't achieve.** It hard-coded `indexed_notes = total_notes` and `index_healthy = True` even when notes raised during indexing, so `reindex_notes` and startup logs always claimed a perfect index. It now reports the count actually indexed (already-current notes plus this run's successes) and marks the index unhealthy when any note that needed indexing failed.
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.0` (adds `QdrantStorage.delete_points`).
+
 ## [1.0.5] - 2026-05-30
 
 ### Fixed

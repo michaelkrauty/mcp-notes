@@ -175,18 +175,37 @@ class NoteIndexer:
         indexed_count = 0
         for parsed, category in notes_to_index:
             try:
-                await self._index_note(parsed, category)
+                new_chunk_count = await self._index_note(parsed, category)
+                if not force:
+                    # Incremental re-index can shrink a note; upsert replaces
+                    # same-ID chunks but cannot remove the chunks left over from a
+                    # previous, larger version. Prune them. In force mode the
+                    # collection was just recreated, so no orphans are possible.
+                    await self._delete_orphan_chunks(parsed.id, new_chunk_count)
                 indexed_count += 1
             except Exception as e:
                 logger.error(f"Failed to index note {parsed.id}: {e}")
 
         logger.info(f"Indexed {indexed_count}/{len(notes_to_index)} notes")
 
+        # Account for notes that were already up to date (skipped this pass) plus
+        # the ones we just indexed successfully. A note whose indexing raised is
+        # not counted as indexed, and the index is only healthy if every note that
+        # needed indexing succeeded.
+        previously_indexed = total_notes - len(notes_to_index)
+        indexed_notes = previously_indexed + indexed_count
+        index_healthy = indexed_count == len(notes_to_index)
+        if not index_healthy:
+            logger.warning(
+                f"Indexing incomplete: {indexed_count}/{len(notes_to_index)} "
+                "notes indexed successfully"
+            )
+
         return IndexStatus(
             total_notes=total_notes,
-            indexed_notes=total_notes,
+            indexed_notes=indexed_notes,
             last_indexed=datetime.now(UTC),
-            index_healthy=True,
+            index_healthy=index_healthy,
         )
 
     async def index_note(self, note_id: UUID) -> None:
