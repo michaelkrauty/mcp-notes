@@ -49,8 +49,9 @@ async def rename_tag(old_tag: str, new_tag: str) -> dict:
     Returns:
         Count of notes updated, or error dict if validation fails
     """
-    # Validate old tag (just normalize)
-    old_normalized = old_tag.lower().strip()
+    # Normalize the source tag the same way tags are stored (lower, strip, and
+    # space->hyphen) so a caller-supplied spaced tag still matches.
+    old_normalized = old_tag.lower().strip().replace(" ", "-")
     if not old_normalized:
         return error_response(ErrorCode.VALIDATION_FAILED, "Old tag cannot be empty")
 
@@ -102,8 +103,9 @@ async def merge_tags(source_tags: list[str], target_tag: str) -> dict:
     if error:
         return error_response(ErrorCode.VALIDATION_FAILED, f"Invalid target tag: {error}")
 
-    # Normalize source tags
-    source_normalized = [t.lower().strip() for t in source_tags if t.strip()]
+    # Normalize source tags the same way tags are stored (lower, strip, and
+    # space->hyphen) so caller-supplied spaced tags still match.
+    source_normalized = [t.lower().strip().replace(" ", "-") for t in source_tags if t.strip()]
     if not source_normalized:
         return error_response(ErrorCode.VALIDATION_FAILED, "Source tags list cannot be empty")
 

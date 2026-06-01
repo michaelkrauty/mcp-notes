@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.7] - 2026-05-31
+
+### Fixed
+
+- **`revalidate_fact_sources` no longer resets every fact source when called with no arguments.** With neither `source_id` nor `source_type`, it issued an unfiltered `UPDATE` that flipped *all* modified/deleted sources back to `active`, silently wiping the integrity-tracking state the tool exists to manage. It now fails fast with `INVALID_INPUT`, requiring at least one filter.
+- **`add_fact`, `update_fact`, and `add_facts_batch` now reject out-of-range `confidence`.** The value was passed straight through with no bounds check despite the documented `0.0–1.0` range, so a value like `42.0` was stored and then corrupted `min_confidence` filtering. Out-of-range (or non-numeric, in the batch path) values now return a clear `INVALID_INPUT` error (per-item in the batch). A `None` confidence on `update_fact` still means "unchanged."
+- **`rename_tag` and `merge_tags` now match a space-containing source tag.** Tags are stored normalized (lowercased, spaces → hyphens), but these tools normalized the *source* tag with only `lower().strip()`, so `rename_tag(old_tag="my tag", ...)` never matched the stored `my-tag` and silently reported `0` updates. The source tag is now normalized the same way it is stored.
+
 ## [1.0.6] - 2026-05-30
 
 ### Fixed
