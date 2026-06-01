@@ -48,6 +48,13 @@ class TestRevalidateGuard:
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
 
+    async def test_guard_returns_before_touching_integrity_manager(self):
+        # Fail-fast: the no-arg guard must short-circuit before any service access.
+        with patch("mcp_notes.tools.integrity.get_integrity_manager") as get_mgr:
+            result = await revalidate_fact_sources()
+        assert is_error_response(result)
+        get_mgr.assert_not_called()
+
 
 class TestConfidenceBounds:
     """confidence is documented as 0.0-1.0; out-of-range values are rejected."""
@@ -73,6 +80,22 @@ class TestConfidenceBounds:
         assert "id" in result
         assert result["confidence"] == 0.5
 
+    async def test_add_fact_accepts_boundaries(self, temp_fact_store):
+        # 0.0 and 1.0 are valid (inclusive bounds).
+        for i, c in enumerate((0.0, 1.0)):
+            result = await add_fact(
+                subject=f"S{i}", predicate="rel", object="O", confidence=c
+            )
+            assert result.get("confidence") == c
+
+    async def test_add_fact_rejects_none(self, temp_fact_store):
+        # None is not "unchanged" for add_fact (the column is NOT NULL).
+        result = await add_fact(
+            subject="A", predicate="rel", object="B", confidence=None
+        )
+        assert is_error_response(result)
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+
     async def test_update_fact_rejects_out_of_range(self, temp_fact_store):
         created = await add_fact(subject="A", predicate="rel", object="B")
         result = await update_fact(fact_id=created["id"], confidence=2.0)
@@ -94,6 +117,17 @@ class TestConfidenceBounds:
         assert len(result["errors"]) == 1
         assert result["errors"][0]["index"] == 1
         assert "confidence" in result["errors"][0]["error"]
+
+    async def test_batch_rejects_none_and_nonnumeric(self, temp_fact_store):
+        # Raw dict input: null and non-numeric confidence are rejected per-item,
+        # not passed through to the NOT NULL column.
+        result = await add_facts_batch([
+            {"subject": "A", "predicate": "rel", "object": "B"},  # defaults to 1.0
+            {"subject": "C", "predicate": "rel", "object": "D", "confidence": None},
+            {"subject": "E", "predicate": "rel", "object": "F", "confidence": "high"},
+        ])
+        assert result["added"] == 1
+        assert {e["index"] for e in result["errors"]} == {1, 2}
 
 
 class TestTagNormalization:

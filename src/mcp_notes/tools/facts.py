@@ -56,12 +56,12 @@ def _validate_entity_name(name: str, field: str = "entity") -> str | dict:
 def _validate_confidence(confidence: object) -> str | None:
     """Validate a confidence value against the documented 0.0-1.0 range.
 
-    Returns an error message if ``confidence`` is a number outside that range
-    (or not a number at all), else ``None``. ``None`` itself is accepted so
-    callers can pass an optional "not provided" value through unchanged.
+    Returns an error message if ``confidence`` is not a number in that range,
+    else ``None``. ``None`` is treated as invalid ("not a number") because the
+    stored column is NOT NULL and ``add``/``batch`` always set a value; the one
+    caller for which an omitted confidence is legitimate (``update_fact``, where
+    it means "leave unchanged") must guard with ``is not None`` before calling.
     """
-    if confidence is None:
-        return None
     if isinstance(confidence, bool) or not isinstance(confidence, int | float):
         return f"confidence must be a number between 0.0 and 1.0, got {confidence!r}"
     if not 0.0 <= confidence <= 1.0:
@@ -348,9 +348,11 @@ async def update_fact(
     except ValueError:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {fact_id}")
 
-    confidence_error = _validate_confidence(confidence)
-    if confidence_error:
-        return error_response(ErrorCode.INVALID_INPUT, confidence_error)
+    # None means "leave unchanged" here, so only validate a supplied value.
+    if confidence is not None:
+        confidence_error = _validate_confidence(confidence)
+        if confidence_error:
+            return error_response(ErrorCode.INVALID_INPUT, confidence_error)
 
     # Parse dates if provided - UNSET means not provided
     parsed_valid_from: date_type | None | UnsetType = UNSET
