@@ -53,6 +53,22 @@ def _validate_entity_name(name: str, field: str = "entity") -> str | dict:
     return name.strip()
 
 
+def _validate_confidence(confidence: object) -> str | None:
+    """Validate a confidence value against the documented 0.0-1.0 range.
+
+    Returns an error message if ``confidence`` is not a number in that range,
+    else ``None``. ``None`` is treated as invalid ("not a number") because the
+    stored column is NOT NULL and ``add``/``batch`` always set a value; the one
+    caller for which an omitted confidence is legitimate (``update_fact``, where
+    it means "leave unchanged") must guard with ``is not None`` before calling.
+    """
+    if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+        return f"confidence must be a number between 0.0 and 1.0, got {confidence!r}"
+    if not 0.0 <= confidence <= 1.0:
+        return f"confidence must be between 0.0 and 1.0, got {confidence}"
+    return None
+
+
 @mcp.tool()
 async def add_fact(
     subject: str,
@@ -99,6 +115,10 @@ async def add_fact(
         validated = _validate_entity_name(value, field)
         if isinstance(validated, dict):
             return validated  # Error response
+
+    confidence_error = _validate_confidence(confidence)
+    if confidence_error:
+        return error_response(ErrorCode.INVALID_INPUT, confidence_error)
 
     store = get_fact_store()
 
@@ -173,7 +193,10 @@ async def add_fact(
 
 
 @mcp.tool()
-async def add_facts_batch(facts: list[dict]) -> dict:
+# Inherently a long per-item validator (already over the branch limit); the
+# added confidence check tips it past the statement limit too. noqa the new
+# code rather than carve up well-tested batch logic for a small fix.
+async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
     """
     Batch import multiple facts in a single transaction.
 
@@ -212,6 +235,12 @@ async def add_facts_batch(facts: list[dict]) -> dict:
                 validation_failed = True
                 break
         if validation_failed:
+            continue
+
+        confidence = fact_data.get("confidence", 1.0)
+        confidence_error = _validate_confidence(confidence)
+        if confidence_error:
+            errors.append({"index": i, "error": confidence_error})
             continue
 
         # Parse dates
@@ -269,7 +298,7 @@ async def add_facts_batch(facts: list[dict]) -> dict:
                 subject_type=fact_data.get("subject_type", "entity"),
                 object_type=fact_data.get("object_type", "entity"),
                 context=fact_data.get("context"),
-                confidence=fact_data.get("confidence", 1.0),
+                confidence=confidence,
                 valid_from=parsed_valid_from,
                 valid_to=parsed_valid_to,
                 source=source,
@@ -318,6 +347,12 @@ async def update_fact(
         uuid = UUID(fact_id)
     except ValueError:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {fact_id}")
+
+    # None means "leave unchanged" here, so only validate a supplied value.
+    if confidence is not None:
+        confidence_error = _validate_confidence(confidence)
+        if confidence_error:
+            return error_response(ErrorCode.INVALID_INPUT, confidence_error)
 
     # Parse dates if provided - UNSET means not provided
     parsed_valid_from: date_type | None | UnsetType = UNSET

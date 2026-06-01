@@ -139,6 +139,13 @@ async def revalidate_fact_sources(
     Returns:
         Count of sources revalidated
     """
+    if not source_id and not source_type:
+        return error_response(
+            ErrorCode.INVALID_INPUT,
+            "Provide at least one of source_id or source_type. Refusing to "
+            "revalidate (reset to active) every fact source at once.",
+        )
+
     integrity = get_integrity_manager()
 
     uuid = None
