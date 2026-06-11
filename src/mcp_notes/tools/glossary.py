@@ -276,6 +276,15 @@ async def update_glossary_entry(
     if not entry:
         return error_response(ErrorCode.GLOSSARY_NOT_FOUND, f"Entry not found: {term_or_id}")
 
+    # Preflight cross-entry alias collisions. GlossaryStore.update() deletes
+    # the entry's old aliases before inserting the new ones, so letting it
+    # discover a collision mid-insert would leave the entry's aliases cleared.
+    if is_set(aliases) and aliases is not None:
+        for alias in aliases:
+            existing = store.lookup(alias)
+            if existing is not None and existing.id != entry.id:
+                return error_response(ErrorCode.DUPLICATE, f"Term '{alias}' already exists")
+
     try:
         updated = store.update(
             entry_id=entry.id,

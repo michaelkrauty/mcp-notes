@@ -580,3 +580,38 @@ class TestGlossaryInputValidation:
 
         assert "error_code" not in result
         assert result["expansion"] == "New Expansion"
+
+    @pytest.mark.asyncio
+    async def test_update_alias_colliding_with_other_entry_leaves_aliases_intact(
+        self, tmp_notes_dir
+    ):
+        """A cross-entry alias collision is caught before store.update can
+        delete the target's existing aliases."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["old"])
+        await add_glossary_entry("BBB", "Exp B", "Def B", aliases=["dup"])
+
+        result = await update_glossary_entry("AAA", aliases=[" dup "])
+
+        assert result["error_code"] == "duplicate"
+        assert get_glossary_store().lookup("AAA").aliases == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_update_alias_colliding_with_other_entry_term(self, tmp_notes_dir):
+        """Colliding with another entry's canonical term is also refused."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["old"])
+        await add_glossary_entry("BBB", "Exp B", "Def B")
+
+        result = await update_glossary_entry("AAA", aliases=["bbb"])
+
+        assert result["error_code"] == "duplicate"
+        assert get_glossary_store().lookup("AAA").aliases == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_update_alias_matching_own_term_or_alias_is_allowed(self, tmp_notes_dir):
+        """Re-submitting the entry's own alias set must not trip the preflight."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["mine"])
+
+        result = await update_glossary_entry("AAA", aliases=["mine", "aaa"])
+
+        assert "error_code" not in result
+        assert set(get_glossary_store().lookup("AAA").aliases) == {"mine", "aaa"}
