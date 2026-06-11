@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.8] - 2026-06-11
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.1`.
+
+### Fixed
+
+Inherited from `vector-core` `v1.2.1`:
+
+- **Fact query and list results are ordered most-recently-modified-first again.** `FactStore` batch reads dropped the `ORDER BY modified DESC` ordering, so `query_facts`, `list_facts`, and related tools returned facts in arbitrary order.
+- **Glossary alias-only updates no longer leave a stale change-detection hash.** `GlossaryStore.update()` kept the old `entry_hash` when only aliases changed, so subsequent change detection could miss or misreport the update.
+- **Blank or duplicate glossary input is rejected with `INVALID_INPUT`.** Whitespace-only terms and entries that collide after normalization previously stored junk or crashed on the underlying UNIQUE constraint; they now fail fast with a clear error.
+
 ## [1.0.7] - 2026-05-31
 
 ### Fixed
