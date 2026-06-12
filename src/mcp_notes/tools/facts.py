@@ -110,8 +110,14 @@ async def add_fact(
     """
     from datetime import date as date_type
 
-    # Validate entity names
-    for field, value in [("subject", subject), ("predicate", predicate), ("object", object)]:
+    # Validate entity names and types
+    for field, value in [
+        ("subject", subject),
+        ("predicate", predicate),
+        ("object", object),
+        ("subject_type", subject_type),
+        ("object_type", object_type),
+    ]:
         validated = _validate_entity_name(value, field)
         if isinstance(validated, dict):
             return validated  # Error response
@@ -226,10 +232,19 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
             })
             continue
 
-        # Validate entity names
+        # Validate entity names and types (effective values, so explicit blanks
+        # are rejected while the always-valid default "entity" passes)
+        subject_type = fact_data.get("subject_type", "entity")
+        object_type = fact_data.get("object_type", "entity")
         validation_failed = False
-        for field in ("subject", "predicate", "object"):
-            validated = _validate_entity_name(fact_data[field], field)
+        for field, value in (
+            ("subject", fact_data["subject"]),
+            ("predicate", fact_data["predicate"]),
+            ("object", fact_data["object"]),
+            ("subject_type", subject_type),
+            ("object_type", object_type),
+        ):
+            validated = _validate_entity_name(value, field)
             if isinstance(validated, dict):
                 errors.append({"index": i, "error": validated.get("error", f"Invalid {field}")})
                 validation_failed = True
@@ -295,8 +310,8 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
                 subject=fact_data["subject"],
                 predicate=fact_data["predicate"],
                 object_value=fact_data["object"],
-                subject_type=fact_data.get("subject_type", "entity"),
-                object_type=fact_data.get("object_type", "entity"),
+                subject_type=subject_type,
+                object_type=object_type,
                 context=fact_data.get("context"),
                 confidence=confidence,
                 valid_from=parsed_valid_from,

@@ -2,6 +2,7 @@
 
 - revalidate_fact_sources refuses a no-argument global reset
 - add_fact / update_fact / add_facts_batch reject out-of-range confidence
+- add_fact / add_facts_batch reject blank subject_type / object_type
 - rename_tag / merge_tags normalize a spaced source tag to the stored form
 """
 
@@ -128,6 +129,51 @@ class TestConfidenceBounds:
         ])
         assert result["added"] == 1
         assert {e["index"] for e in result["errors"]} == {1, 2}
+
+
+class TestTypeValidation:
+    """subject_type / object_type must be non-blank; the tool layer returns a
+    structured error dict instead of letting the store raise ValueError."""
+
+    async def test_add_fact_rejects_blank_subject_type(self, temp_fact_store):
+        result = await add_fact(
+            subject="A", predicate="rel", object="B", subject_type="   "
+        )
+        assert is_error_response(result)
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        assert "subject_type" in result["message"]
+
+    async def test_add_fact_rejects_empty_object_type(self, temp_fact_store):
+        result = await add_fact(
+            subject="A", predicate="rel", object="B", object_type=""
+        )
+        assert is_error_response(result)
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        assert "object_type" in result["message"]
+
+    async def test_add_fact_accepts_explicit_types(self, temp_fact_store):
+        result = await add_fact(
+            subject="A",
+            predicate="works_at",
+            object="B",
+            subject_type="person",
+            object_type="organization",
+        )
+        assert result["subject_type"] == "person"
+        assert result["object_type"] == "organization"
+
+    async def test_batch_blank_type_rejects_only_the_bad_item(self, temp_fact_store):
+        # The bad item lands in errors; items after it must still be processed
+        # (a store-level ValueError would abort the rest of the batch).
+        result = await add_facts_batch([
+            {"subject": "A", "predicate": "rel", "object": "B"},
+            {"subject": "C", "predicate": "rel", "object": "D", "object_type": "  "},
+            {"subject": "E", "predicate": "rel", "object": "F", "subject_type": "person"},
+        ])
+        assert result["added"] == 2
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["index"] == 1
+        assert "object_type" in result["errors"][0]["error"]
 
 
 class TestTagNormalization:
