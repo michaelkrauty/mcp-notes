@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.10] - 2026-06-12
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.2`.
+- **Defense-in-depth for glossary alias validation.** vector-core `v1.2.2` makes `GlossaryStore.create()` and `update()` validate aliases (cross-entry collisions and case-normalized intra-list duplicates) *before* any row is written, raising `TermExistsError` with the store left fully unchanged, plus a rollback-on-error backstop. mcp-notes' glossary tools call `GlossaryStore` directly and already preflight these checks in their own tool layer (since `1.0.9`), so no user-reachable bug is fixed here — the store-level validation guards against races between the tool-layer preflight and the store mutation, and against any future code path that hits the store without that preflight.
+
 ## [1.0.9] - 2026-06-11
 
 ### Fixed
