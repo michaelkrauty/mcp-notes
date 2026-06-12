@@ -450,3 +450,28 @@ class TestFindConnections:
         assert len(result) >= 1
         # Entity names come from the stored facts, not the query casing
         assert result[0]["entities"] == ["Alice", "Bob", "Carol"]
+
+    @pytest.mark.asyncio
+    async def test_type_filters_match_mixed_case(self, temp_fact_store):
+        """source_type/target_type filters are case-insensitive (vector-core#18).
+
+        Adjacency rows store types lowercased; passing a type exactly as facts
+        display it (e.g. "Person") previously returned no paths.
+        """
+        await add_fact(
+            subject="Alice",
+            predicate="manages",
+            object="Bob",
+            subject_type="Person",
+            object_type="Person",
+        )
+
+        result = await find_connections(
+            source_entity="Alice",
+            target_entity="Bob",
+            source_type="Person",
+            target_type="Person",
+        )
+
+        assert len(result) >= 1
+        assert result[0]["entities"] == ["Alice", "Bob"]

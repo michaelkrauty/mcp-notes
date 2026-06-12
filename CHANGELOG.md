@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.14] - 2026-06-12
+
+### Fixed
+
+- **`find_connections` `source_type`/`target_type` filters are now case-insensitive (vector-core `1.2.5`); passing a type exactly as facts display it (e.g. `"Person"`) previously returned no paths.** The store's `entity_adjacency` rows are stored lowercased, but the filters compared the caller's raw input against them, so any mixed-case type silently matched nothing. mcp-notes passes `source_type`/`target_type` through to the store unmodified, so this was user-reachable from the `find_connections` tool. This was the runner-up item in #13, fixed upstream as vector-core#18.
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.5`. Besides the `find_connections` fix above, `v1.2.5` also makes `VectorStore.get_metadata()` round-trip symmetrically with `set_metadata()`; mcp-notes does not read collection metadata, so that fix does not affect notes.
+
 ## [1.0.13] - 2026-06-12
 
 ### Fixed
