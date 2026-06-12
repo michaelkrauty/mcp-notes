@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.12] - 2026-06-12
+
+### Fixed
+
+- **Blank `subject_type` / `object_type` are rejected with `INVALID_INPUT`.** `add_fact` and `add_facts_batch` preflighted `subject`/`predicate`/`object` and `confidence` at the tool layer, but not the type fields — a whitespace-only `subject_type` or `object_type` was silently stored as garbage. After the vector-core `v1.2.4` bump (which makes `FactStore.create()` raise `ValueError` on blank type fields), the failure mode would have shifted from silent garbage to a raw `ValueError`: an unfriendly generic tool error in `add_fact`, and worse in `add_facts_batch`, where `store.create` is wrapped in `try/except DuplicateFactError` only, so the `ValueError` aborted the entire batch mid-way (earlier items committed, later items never processed). Both tools now validate the effective `subject_type`/`object_type` alongside the existing entity-name checks and return the structured `invalid_input` error dict; in the batch case the bad item lands in the per-item `errors` list and the remaining items are still processed.
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.4`. `FactStore.create()` and `update()` now validate subject/predicate/object, the type fields, and the `confidence` range (0.0-1.0) before any database access, raising `ValueError` on bad input. This is defense-in-depth beneath mcp-notes' tool-layer preflight: with the fix above, no user-reachable path hands the store a blank field, but the store-level validation guards any future code path that skips the preflight.
+
 ## [1.0.11] - 2026-06-12
 
 ### Fixed
