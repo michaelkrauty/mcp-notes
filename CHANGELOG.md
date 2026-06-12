@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.11] - 2026-06-12
+
+### Fixed
+
+- **Case-only renames and alias-promoting renames of glossary terms no longer fail.** Bumped the `vector-core` dependency to `v1.2.3`, which fixes a bug in `GlossaryStore.update()`: the term-uniqueness check did not exclude the entry being updated, so renaming a term to a different casing of itself (e.g. `"USAF"` → `"Usaf"`) or to one of the entry's own aliases incorrectly raised `TermExistsError`. This bug was reachable through `update_glossary_entry` — mcp-notes' tool-layer preflight validation (added in `1.0.9`) self-excludes the current entry for *alias* collision checks, but the *term* path is validated by the store itself, so these renames were impossible through mcp-notes until now.
+
 ## [1.0.10] - 2026-06-12
 
 ### Changed
