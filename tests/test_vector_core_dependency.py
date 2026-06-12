@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_vector_core_dependency_is_pinned_to_v1_2_1() -> None:
+def test_vector_core_dependency_is_pinned_to_v1_2_2() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = pyproject["project"]["dependencies"]
 
