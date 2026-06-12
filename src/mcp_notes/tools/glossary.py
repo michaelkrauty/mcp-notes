@@ -21,7 +21,7 @@ warnings.filterwarnings(
     message=".*UNSET.*",
 )
 
-from vector_core import UNSET, UnsetType, validate_limit
+from vector_core import UNSET, UnsetType, is_set, validate_limit
 from vector_core.errors import ErrorCode, error_response
 from vector_core.glossary import GlossaryNotFoundError, TermExistsError
 
@@ -34,6 +34,65 @@ from mcp_notes.singletons import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _require_text(value: str, field: str) -> dict | None:
+    """Return an INVALID_INPUT error dict if a text field is blank, else None.
+
+    These tools call the GlossaryStore directly (not through vector-core's
+    GlossaryToolHelper), so the store-facing validation has to live here.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return error_response(
+            ErrorCode.INVALID_INPUT, f"{field} must be a non-empty string"
+        )
+    return None
+
+
+def _require_alias_texts(aliases: list[str]) -> dict | None:
+    """Return an INVALID_INPUT error dict if any alias is blank or a duplicate
+    after normalization (strip + case-fold), else None.
+
+    Duplicates must be caught before the store touches the database: alias
+    replacement deletes the old aliases first, so a UNIQUE-constraint failure
+    mid-insert would leave the entry partially mutated.
+    """
+    seen: set[str] = set()
+    for alias in aliases:
+        if not isinstance(alias, str) or not alias.strip():
+            return error_response(
+                ErrorCode.INVALID_INPUT, "aliases must not contain empty strings"
+            )
+        normalized = alias.strip().lower()
+        if normalized in seen:
+            return error_response(
+                ErrorCode.INVALID_INPUT, f"duplicate alias: {alias.strip()}"
+            )
+        seen.add(normalized)
+    return None
+
+
+def _validate_update_inputs(
+    term: str | None,
+    expansion: str | None,
+    definition: str | None,
+    aliases: list[str] | None | UnsetType,
+) -> dict | None:
+    """Validate update_glossary_entry inputs; return an error dict or None.
+
+    None means "leave unchanged" for term/expansion/definition, so only
+    explicit values are checked; aliases use UNSET for "unchanged" and
+    None/[] for "clear", which are valid and stay untouched.
+    """
+    fields = ((term, "term"), (expansion, "expansion"), (definition, "definition"))
+    for value, field in fields:
+        if value is not None:
+            err = _require_text(value, field)
+            if err:
+                return err
+    if is_set(aliases) and aliases is not None:
+        return _require_alias_texts(aliases)
+    return None
 
 
 @mcp.tool()
@@ -55,8 +114,25 @@ async def add_glossary_entry(
         aliases: Optional alternative terms that point to this entry
 
     Returns:
-        Created entry as dict
+        Created entry as dict, or error dict for blank/duplicate input
     """
+    for value, field in ((term, "term"), (expansion, "expansion"), (definition, "definition")):
+        err = _require_text(value, field)
+        if err:
+            return err
+    if aliases is not None:
+        err = _require_alias_texts(aliases)
+        if err:
+            return err
+
+    term = term.strip()
+    expansion = expansion.strip()
+    definition = definition.strip()
+    # A blank domain means "no domain", matching update_glossary_entry's
+    # documented "" semantics.
+    domain = domain.strip() if isinstance(domain, str) and domain.strip() else None
+    aliases = [a.strip() for a in aliases] if aliases is not None else None
+
     store = get_glossary_store()
 
     try:
@@ -174,18 +250,40 @@ async def update_glossary_entry(
         term: New canonical term (optional)
         expansion: New expansion (optional)
         definition: New definition (optional)
-        domain: New domain (optional, pass "" to clear)
+        domain: New domain (optional, pass "" or null to clear)
         aliases: New aliases (optional, pass [] to clear)
 
     Returns:
         Updated entry as dict
     """
+    # Validate provided fields before touching the store.
+    err = _validate_update_inputs(term, expansion, definition, aliases)
+    if err:
+        return err
+    term = term.strip() if term is not None else None
+    expansion = expansion.strip() if expansion is not None else None
+    definition = definition.strip() if definition is not None else None
+    if is_set(domain) and domain is not None:
+        # "" is documented as "clear"; store it as a real NULL.
+        domain = domain.strip() or None
+    if is_set(aliases) and aliases is not None:
+        aliases = [a.strip() for a in aliases]
+
     store = get_glossary_store()
 
     # Find entry by term or ID
     entry = store.find_by_term_or_id(term_or_id)
     if not entry:
         return error_response(ErrorCode.GLOSSARY_NOT_FOUND, f"Entry not found: {term_or_id}")
+
+    # Preflight cross-entry alias collisions. GlossaryStore.update() deletes
+    # the entry's old aliases before inserting the new ones, so letting it
+    # discover a collision mid-insert would leave the entry's aliases cleared.
+    if is_set(aliases) and aliases is not None:
+        for alias in aliases:
+            existing = store.lookup(alias)
+            if existing is not None and existing.id != entry.id:
+                return error_response(ErrorCode.DUPLICATE, f"Term '{alias}' already exists")
 
     try:
         updated = store.update(

@@ -465,3 +465,153 @@ class TestGlossaryIntegration:
             filtered = await list_glossary(domain=domain)
             assert len(filtered) == 1
             assert filtered[0]["domain"] == domain
+
+
+class TestGlossaryInputValidation:
+    """Blank or duplicate glossary input fails fast with INVALID_INPUT.
+
+    These tools call the GlossaryStore directly (not vector-core's
+    GlossaryToolHelper), so the validation lives in the tool layer here.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("term", "expansion", "definition", "field"),
+        [
+            ("", "Expansion", "Definition", "term"),
+            ("   ", "Expansion", "Definition", "term"),
+            ("TERM", "", "Definition", "expansion"),
+            ("TERM", "Expansion", "\t\n", "definition"),
+        ],
+    )
+    async def test_add_blank_required_field(
+        self, tmp_notes_dir, term, expansion, definition, field
+    ):
+        result = await add_glossary_entry(term, expansion, definition)
+
+        assert result["error_code"] == "invalid_input"
+        assert field in result["message"]
+        assert get_glossary_store().count() == 0
+
+    @pytest.mark.asyncio
+    async def test_add_blank_alias(self, tmp_notes_dir):
+        result = await add_glossary_entry(
+            "TERM", "Expansion", "Definition", aliases=["ok", "  "]
+        )
+
+        assert result["error_code"] == "invalid_input"
+        assert get_glossary_store().count() == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("aliases", [
+        ["api", " api "],
+        ["API", "api"],
+        ["dup", "other", "dup"],
+    ])
+    async def test_add_duplicate_aliases_rejected(self, tmp_notes_dir, aliases):
+        """Aliases that collide after strip + case-fold fail fast instead of
+        hitting the UNIQUE constraint mid-insert."""
+        result = await add_glossary_entry(
+            "TERM", "Expansion", "Definition", aliases=aliases
+        )
+
+        assert result["error_code"] == "invalid_input"
+        assert "duplicate alias" in result["message"]
+        assert get_glossary_store().count() == 0
+
+    @pytest.mark.asyncio
+    async def test_add_strips_whitespace_and_blank_domain_is_none(self, tmp_notes_dir):
+        result = await add_glossary_entry(
+            "  USAF  ", "  United States Air Force ", " Air branch. ",
+            domain="   ", aliases=[" Air Force "],
+        )
+
+        assert "error_code" not in result
+        assert result["term"] == "USAF"
+        assert result["expansion"] == "United States Air Force"
+        assert result["definition"] == "Air branch."
+        assert result["domain"] is None
+        assert result["aliases"] == ["Air Force"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [
+        {"term": " "},
+        {"expansion": ""},
+        {"definition": "\n"},
+        {"aliases": ["valid", ""]},
+        {"aliases": ["new", " New "]},
+    ])
+    async def test_update_blank_or_duplicate_field(self, tmp_notes_dir, kwargs):
+        await add_glossary_entry("API", "Expansion", "Definition")
+
+        result = await update_glossary_entry("API", **kwargs)
+
+        assert result["error_code"] == "invalid_input"
+        # Entry unchanged
+        entry = get_glossary_store().lookup("API")
+        assert entry.expansion == "Expansion"
+        assert entry.aliases == []
+
+    @pytest.mark.asyncio
+    async def test_update_blank_domain_clears(self, tmp_notes_dir):
+        """The documented '' -> clear semantics now store a real NULL."""
+        await add_glossary_entry("API", "Exp", "Def", domain="tech")
+
+        result = await update_glossary_entry("API", domain="  ")
+
+        assert "error_code" not in result
+        assert result["domain"] is None
+        assert get_glossary_store().lookup("API").domain is None
+
+    @pytest.mark.asyncio
+    async def test_update_none_domain_still_clears(self, tmp_notes_dir):
+        await add_glossary_entry("API", "Exp", "Def", domain="tech")
+
+        result = await update_glossary_entry("API", domain=None)
+
+        assert "error_code" not in result
+        assert get_glossary_store().lookup("API").domain is None
+
+    @pytest.mark.asyncio
+    async def test_update_strips_whitespace(self, tmp_notes_dir):
+        await add_glossary_entry("API", "Exp", "Def")
+
+        result = await update_glossary_entry("API", expansion="  New Expansion  ")
+
+        assert "error_code" not in result
+        assert result["expansion"] == "New Expansion"
+
+    @pytest.mark.asyncio
+    async def test_update_alias_colliding_with_other_entry_leaves_aliases_intact(
+        self, tmp_notes_dir
+    ):
+        """A cross-entry alias collision is caught before store.update can
+        delete the target's existing aliases."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["old"])
+        await add_glossary_entry("BBB", "Exp B", "Def B", aliases=["dup"])
+
+        result = await update_glossary_entry("AAA", aliases=[" dup "])
+
+        assert result["error_code"] == "duplicate"
+        assert get_glossary_store().lookup("AAA").aliases == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_update_alias_colliding_with_other_entry_term(self, tmp_notes_dir):
+        """Colliding with another entry's canonical term is also refused."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["old"])
+        await add_glossary_entry("BBB", "Exp B", "Def B")
+
+        result = await update_glossary_entry("AAA", aliases=["bbb"])
+
+        assert result["error_code"] == "duplicate"
+        assert get_glossary_store().lookup("AAA").aliases == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_update_alias_matching_own_term_or_alias_is_allowed(self, tmp_notes_dir):
+        """Re-submitting the entry's own alias set must not trip the preflight."""
+        await add_glossary_entry("AAA", "Exp A", "Def A", aliases=["mine"])
+
+        result = await update_glossary_entry("AAA", aliases=["mine", "aaa"])
+
+        assert "error_code" not in result
+        assert set(get_glossary_store().lookup("AAA").aliases) == {"mine", "aaa"}

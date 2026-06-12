@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.9] - 2026-06-11
+
+### Fixed
+
+- **Blank or duplicate glossary input is rejected with `INVALID_INPUT`.** `add_glossary_entry` accepted whitespace-only `term`/`expansion`/`definition` and stored junk entries; `update_glossary_entry` likewise accepted blank values. Alias lists that collide after normalization (e.g. `["api", " api "]` or `["API", "api"]`) crashed on the database's UNIQUE constraint — on update, after the old aliases were already deleted. All of these now fail fast with a clear error before anything is written, and accepted values are stripped of surrounding whitespace. A blank `domain` is treated as "no domain" and the documented `""`-clears-domain behavior on update now stores a real NULL instead of an empty string.
+- **Corrected the 1.0.8 release notes**, which claimed this validation arrived with vector-core v1.2.1. That release added it to vector-core's shared `GlossaryToolHelper`, but mcp-notes' glossary tools call the `GlossaryStore` directly and never gained it; this release implements the validation in mcp-notes' own tool layer.
+
 ## [1.0.8] - 2026-06-11
 
 ### Changed
@@ -12,7 +19,6 @@ Inherited from `vector-core` `v1.2.1`:
 
 - **Fact query and list results are ordered most-recently-modified-first again.** `FactStore` batch reads dropped the `ORDER BY modified DESC` ordering, so `query_facts`, `list_facts`, and related tools returned facts in arbitrary order.
 - **Glossary alias-only updates no longer leave a stale change-detection hash.** `GlossaryStore.update()` kept the old `entry_hash` when only aliases changed, so subsequent change detection could miss or misreport the update.
-- **Blank or duplicate glossary input is rejected with `INVALID_INPUT`.** Whitespace-only terms and entries that collide after normalization previously stored junk or crashed on the underlying UNIQUE constraint; they now fail fast with a clear error.
 
 ## [1.0.7] - 2026-05-31
 
