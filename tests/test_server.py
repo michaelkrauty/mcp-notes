@@ -13,6 +13,7 @@ from mcp_notes.server import (
     get_git,
     get_indexer,
     get_links,
+    get_note_history,
     get_search,
     get_store,
     list_categories,
@@ -20,6 +21,7 @@ from mcp_notes.server import (
     list_tags,
     read_note,
     rename_tag,
+    restore_note_version,
     search_notes,
     update_note,
 )
@@ -578,6 +580,38 @@ class TestRestoreNoteVersion:
         result = await restore_note_version("not-a-uuid", "abc123")
         assert "error_code" in result
         assert "Invalid UUID" in result["message"]
+
+
+class TestDeletedNoteRecovery:
+    """End-to-end recovery of deleted notes via history + restore (issue #13)."""
+
+    @pytest.mark.asyncio
+    async def test_history_and_restore_after_delete(self, tmp_notes_dir):
+        """create -> delete -> get_note_history -> restore_note_version works."""
+        created = await create_note(
+            title="Recoverable Note",
+            content="Important content.",
+            category="work",
+        )
+        note_id = created["id"]
+
+        deleted = await delete_note(note_id)
+        assert deleted.get("success") is True
+
+        # History must be discoverable even though the path is gone
+        history = await get_note_history(note_id)
+        assert len(history) >= 2
+        assert all("commit_sha" in v for v in history)
+
+        # Restore from the creation commit (oldest entry)
+        restored = await restore_note_version(note_id, history[-1]["commit_sha"])
+        assert "error_code" not in restored, restored
+        assert restored["title"] == "Recoverable Note"
+        assert "Important content." in restored["content"]
+
+        # The restored note is readable through the store again
+        note = await read_note(note_id)
+        assert note["title"] == "Recoverable Note"
 
 
 class TestGetNoteLinks:

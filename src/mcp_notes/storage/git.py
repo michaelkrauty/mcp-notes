@@ -482,7 +482,14 @@ __pycache__/
         if current_path is not None:
             note_path = current_path
         else:
-            note_path = self.base_dir / "notes" / f"{note_id}.md"
+            # Note unknown to the store (e.g. deleted): restore to the path
+            # it last existed at so the layout stays consistent, falling back
+            # to the legacy flat path for notes that predate the nested layout.
+            last_known = self._find_last_known_path(note_id)
+            if last_known is not None:
+                note_path = self.base_dir / last_known
+            else:
+                note_path = self.base_dir / "notes" / f"{note_id}.md"
 
         # Ensure parent directory exists
         note_path.parent.mkdir(parents=True, exist_ok=True)
