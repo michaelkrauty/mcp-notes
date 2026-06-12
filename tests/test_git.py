@@ -775,3 +775,34 @@ class TestGitManagerDeletedNoteHistory:
         found = manager._find_last_known_path(note_id)
 
         assert found == f"notes/personal/my-note-{note_id}.md"
+
+    def test_find_last_known_path_ignores_uuid_mentions_in_slug(self, tmp_path, monkeypatch):
+        """A note whose slug mentions another note's UUID must not match."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        deleted_id = uuid4()
+        other_id = uuid4()
+        notes_dir = tmp_path / "notes" / "work"
+        notes_dir.mkdir(parents=True)
+
+        # Unrelated note whose filename contains the deleted note's UUID in
+        # its slug portion (canonical UUID is at the end of the filename).
+        decoy_path = notes_dir / f"mentions-{deleted_id}-{other_id}.md"
+        decoy_path.write_text("decoy")
+        manager.commit_create(other_id, "Decoy", path=decoy_path)
+
+        target_path = notes_dir / f"target-{deleted_id}.md"
+        target_path.write_text("target")
+        manager.commit_create(deleted_id, "Target", path=target_path)
+
+        target_path.unlink()
+        manager.commit_delete(deleted_id, "Target", path=target_path)
+
+        found = manager._find_last_known_path(deleted_id)
+
+        assert found == f"notes/work/target-{deleted_id}.md"
+
+        history = manager.get_history(deleted_id)
+        messages = [v.message for v in history]
+        assert all("Decoy" not in m for m in messages)
+        assert any("Create note: Target" in m for m in messages)

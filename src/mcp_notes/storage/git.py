@@ -13,6 +13,7 @@ from git.objects import Blob, Commit
 
 from mcp_notes.models import NoteVersion
 from mcp_notes.settings import settings
+from mcp_notes.storage.slugify import extract_uuid_from_filename
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,9 @@ __pycache__/
         """
         Tree-wide UUID search: find a note's path within a commit tree.
 
-        Matches any markdown file whose path contains the note UUID.
+        Matches markdown files whose filename ends with the note UUID (the
+        canonical "{slug}-{uuid}.md" / legacy "{uuid}.md" layouts), so notes
+        that merely mention another note's UUID in their slug don't match.
 
         Args:
             commit: Commit whose tree to search
@@ -244,11 +247,11 @@ __pycache__/
         Returns:
             Repo-relative path string, or None if not found
         """
-        uuid_str = str(note_id)
         for item in commit.tree.traverse():
             if isinstance(item, Blob):
                 item_path = str(item.path)
-                if uuid_str in item_path and item_path.endswith(".md"):
+                filename = item_path.rsplit("/", 1)[-1]
+                if extract_uuid_from_filename(filename) == note_id:
                     return item_path
         return None
 
