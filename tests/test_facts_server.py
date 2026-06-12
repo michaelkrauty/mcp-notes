@@ -13,6 +13,7 @@ from mcp_notes.server import (
     add_fact,
     add_facts_batch,
     delete_fact,
+    find_connections,
     get_entity,
     get_fact_store,
     list_facts,
@@ -407,3 +408,45 @@ class TestListFacts:
 
         assert len(result) == 1
         assert result[0]["subject"] == "John"
+
+
+class TestFindConnections:
+    """Tests for find_connections tool."""
+
+    @pytest.mark.asyncio
+    async def test_entity_chain_forward_edges(self, temp_fact_store):
+        """Entity chain is correct when the path follows subject->object."""
+        await add_fact(subject="Alice", predicate="manages", object="Bob")
+        await add_fact(subject="Bob", predicate="mentors", object="Carol")
+
+        result = await find_connections(source_entity="Alice", target_entity="Carol")
+
+        assert len(result) >= 1
+        assert result[0]["entities"] == ["Alice", "Bob", "Carol"]
+
+    @pytest.mark.asyncio
+    async def test_entity_chain_backward_edges(self, temp_fact_store):
+        """Entity chain is correct when the path traverses edges backwards.
+
+        The store's BFS is undirected; the chain must not assume every fact
+        was traversed subject->object (issue #13).
+        """
+        await add_fact(subject="Bob", predicate="manages", object="Alice")
+        await add_fact(subject="Carol", predicate="mentors", object="Bob")
+
+        result = await find_connections(source_entity="Alice", target_entity="Carol")
+
+        assert len(result) >= 1
+        assert result[0]["entities"] == ["Alice", "Bob", "Carol"]
+
+    @pytest.mark.asyncio
+    async def test_entity_chain_case_insensitive_cursor(self, temp_fact_store):
+        """Chain rebuild matches entities case-insensitively like the BFS."""
+        await add_fact(subject="Bob", predicate="manages", object="Alice")
+        await add_fact(subject="Carol", predicate="mentors", object="Bob")
+
+        result = await find_connections(source_entity="alice", target_entity="carol")
+
+        assert len(result) >= 1
+        # Entity names come from the stored facts, not the query casing
+        assert result[0]["entities"] == ["Alice", "Bob", "Carol"]

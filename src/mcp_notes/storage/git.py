@@ -9,10 +9,11 @@ from uuid import UUID
 
 from git import GitCommandError, InvalidGitRepositoryError, Repo
 from git.exc import BadName
-from git.objects import Blob
+from git.objects import Blob, Commit
 
 from mcp_notes.models import NoteVersion
 from mcp_notes.settings import settings
+from mcp_notes.storage.slugify import extract_uuid_from_filename
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,56 @@ __pycache__/
                     logger.error(f"Git commit (move fallback) failed: {e2}")
                     return None
 
+    @staticmethod
+    def _find_note_path_in_tree(commit: Commit, note_id: UUID) -> str | None:
+        """
+        Tree-wide UUID search: find a note's path within a commit tree.
+
+        Matches markdown files whose filename ends with the note UUID (the
+        canonical "{slug}-{uuid}.md" / legacy "{uuid}.md" layouts), so notes
+        that merely mention another note's UUID in their slug don't match.
+
+        Args:
+            commit: Commit whose tree to search
+            note_id: Note UUID
+
+        Returns:
+            Repo-relative path string, or None if not found
+        """
+        for item in commit.tree.traverse():
+            if isinstance(item, Blob):
+                item_path = str(item.path)
+                filename = item_path.rsplit("/", 1)[-1]
+                if extract_uuid_from_filename(filename) == note_id:
+                    return item_path
+        return None
+
+    def _find_last_known_path(self, note_id: UUID) -> str | None:
+        """
+        Find the most recent path a note existed at by walking history.
+
+        Used when the note no longer exists on disk (e.g. deleted notes) so
+        its history can still be located by the path it last had.
+
+        Args:
+            note_id: Note UUID
+
+        Returns:
+            Repo-relative path string, or None if the note never existed
+        """
+        repo = self.repo
+        if repo is None:
+            return None
+
+        try:
+            for commit in repo.iter_commits():
+                item_path = self._find_note_path_in_tree(commit, note_id)
+                if item_path is not None:
+                    return item_path
+        except Exception as e:
+            logger.warning(f"Failed to search history for note {note_id}: {e}")
+        return None
+
     def get_history(
         self, note_id: UUID, limit: int = 10, path: Path | None = None
     ) -> list[NoteVersion]:
@@ -250,15 +301,44 @@ __pycache__/
         if repo is None:
             return []
 
+        note_path = self._resolve_history_path(note_id, path)
+        if note_path is None:
+            return []
+
+        return self._git_log_versions(note_path, limit)
+
+    def _resolve_history_path(self, note_id: UUID, path: Path | None) -> str | None:
+        """
+        Resolve the repo-relative path to use for history lookups.
+
+        Args:
+            note_id: Note UUID
+            path: Current path to note file (optional)
+
+        Returns:
+            Repo-relative path string, or None if no path could be found
+        """
         if path is not None:
             try:
-                note_path = str(path.relative_to(self.base_dir))
+                return str(path.relative_to(self.base_dir))
             except ValueError:
-                note_path = str(path)
-        else:
-            # Fallback for legacy
-            note_path = f"notes/{note_id}.md"
+                return str(path)
 
+        # Path unknown (e.g. deleted note): search history for the path
+        # the note last existed at so its commits stay discoverable.
+        return self._find_last_known_path(note_id)
+
+    def _git_log_versions(self, note_path: str, limit: int) -> list[NoteVersion]:
+        """
+        Run git log --follow on a path and parse the output into versions.
+
+        Args:
+            note_path: Repo-relative path to the note file
+            limit: Max versions to return
+
+        Returns:
+            List of NoteVersion objects, newest first
+        """
         try:
             # Use subprocess to call git log with --follow for proper rename tracking
             # gitpython's iter_commits uses rev-list which doesn't support --follow
@@ -357,16 +437,14 @@ __pycache__/
                 pass
 
         # Search for file by UUID pattern in commit tree
-        uuid_str = str(note_id)
-        for item in commit.tree.traverse():
-            if isinstance(item, Blob):
-                item_path = str(item.path)
-                if uuid_str in item_path and item_path.endswith(".md"):
-                    try:
-                        content = item.data_stream.read().decode("utf-8")
-                        return content
-                    except Exception as e:
-                        logger.debug(f"Failed to read content from {item_path}: {e}")
+        found_path = self._find_note_path_in_tree(commit, note_id)
+        if found_path is not None:
+            try:
+                blob = commit.tree / found_path
+                content = blob.data_stream.read().decode("utf-8")
+                return content
+            except Exception as e:
+                logger.debug(f"Failed to read content from {found_path}: {e}")
 
         # Fallback: legacy path
         note_path = f"notes/{note_id}.md"
@@ -407,7 +485,14 @@ __pycache__/
         if current_path is not None:
             note_path = current_path
         else:
-            note_path = self.base_dir / "notes" / f"{note_id}.md"
+            # Note unknown to the store (e.g. deleted): restore to the path
+            # it last existed at so the layout stays consistent, falling back
+            # to the legacy flat path for notes that predate the nested layout.
+            last_known = self._find_last_known_path(note_id)
+            if last_known is not None:
+                note_path = self.base_dir / last_known
+            else:
+                note_path = self.base_dir / "notes" / f"{note_id}.md"
 
         # Ensure parent directory exists
         note_path.parent.mkdir(parents=True, exist_ok=True)

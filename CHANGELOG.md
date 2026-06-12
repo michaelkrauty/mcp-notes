@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.13] - 2026-06-12
+
+### Fixed
+
+- **`find_connections` no longer garbles the `entities` chain when a path traverses an edge backwards.** The underlying graph search is undirected, but the tool rebuilt the entity chain assuming every fact was walked subject→object, so paths like Alice→Carol over facts ("Bob", "manages", "Alice") and ("Carol", "mentors", "Bob") returned `entities=["Bob", "Alice"]` — missing the target and out of order. The chain is now rebuilt direction-aware, walking from the requested source entity and taking the far side of each fact (case-insensitively, matching the search), so the same query returns `["Alice", "Bob", "Carol"]`.
+
+- **`get_note_history` now returns history for deleted notes instead of silently returning `[]`.** After deletion the note's path is no longer known, and the git layer fell back to a legacy flat path that never matches the current nested layout, so the only history-discovery tool came up empty — even though `delete_note` explicitly promises recoverability from git history. The fallback now searches git history for the path the note last existed at (the same UUID-based tree search version restore relies on), so create→delete→`get_note_history` returns the pre-deletion commits. `restore_note_version` was also wired up for the deleted-note case: it restores the file to its last-known path (instead of a legacy flat path) and refreshes the note store's UUID index afterwards, so the restored note is immediately readable again — deleted notes are recoverable end to end.
+
+- **`rename_tag` onto a tag the note already has no longer writes duplicate tags.** Renaming "foo" to "bar" on a note tagged `[foo, bar]` persisted `tags: [bar, bar]` to frontmatter and inflated `list_tags` counts. `rename_tag` now dedupes like its sibling `merge_tags`: the note ends up with exactly one "bar", with the remaining tag order preserved.
+
 ## [1.0.12] - 2026-06-12
 
 ### Fixed

@@ -1,5 +1,6 @@
 """Tests for MCP Notes server module."""
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -12,12 +13,15 @@ from mcp_notes.server import (
     get_git,
     get_indexer,
     get_links,
+    get_note_history,
     get_search,
     get_store,
     list_categories,
     list_notes,
     list_tags,
     read_note,
+    rename_tag,
+    restore_note_version,
     search_notes,
     update_note,
 )
@@ -578,6 +582,38 @@ class TestRestoreNoteVersion:
         assert "Invalid UUID" in result["message"]
 
 
+class TestDeletedNoteRecovery:
+    """End-to-end recovery of deleted notes via history + restore (issue #13)."""
+
+    @pytest.mark.asyncio
+    async def test_history_and_restore_after_delete(self, tmp_notes_dir):
+        """create -> delete -> get_note_history -> restore_note_version works."""
+        created = await create_note(
+            title="Recoverable Note",
+            content="Important content.",
+            category="work",
+        )
+        note_id = created["id"]
+
+        deleted = await delete_note(note_id)
+        assert deleted.get("success") is True
+
+        # History must be discoverable even though the path is gone
+        history = await get_note_history(note_id)
+        assert len(history) >= 2
+        assert all("commit_sha" in v for v in history)
+
+        # Restore from the creation commit (oldest entry)
+        restored = await restore_note_version(note_id, history[-1]["commit_sha"])
+        assert "error_code" not in restored, restored
+        assert restored["title"] == "Recoverable Note"
+        assert "Important content." in restored["content"]
+
+        # The restored note is readable through the store again
+        note = await read_note(note_id)
+        assert note["title"] == "Recoverable Note"
+
+
 class TestGetNoteLinks:
     """Tests for get_note_links tool."""
 
@@ -649,6 +685,29 @@ class TestRenameTag:
 
         result = await rename_tag("old-tag", "new-tag")
         assert result["updated_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_rename_tag_onto_existing_tag_no_duplicates(self, tmp_notes_dir, monkeypatch):
+        """Renaming onto a tag the note already has must not duplicate it (issue #13)."""
+        # Stub the indexer so re-indexing doesn't require a live embedding service
+        fake_indexer = AsyncMock()
+
+        async def fake_get_indexer():
+            return fake_indexer
+
+        monkeypatch.setattr("mcp_notes.tools.tags.get_indexer", fake_get_indexer)
+
+        created = await create_note(
+            title="Doubly Tagged",
+            content="Content",
+            tags=["foo", "bar"],
+        )
+
+        result = await rename_tag("foo", "bar")
+        assert result["updated_count"] == 1
+
+        note = await read_note(created["id"])
+        assert note["tags"] == ["bar"]
 
 
 class TestMergeTags:

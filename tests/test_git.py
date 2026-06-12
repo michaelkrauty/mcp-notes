@@ -4,6 +4,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from mcp_notes.models import NoteVersion
+from mcp_notes.settings import settings
 from mcp_notes.storage.git import GitManager
 
 
@@ -699,3 +700,109 @@ class TestRestoreRepoNone:
             result = manager.restore_version(uuid4(), "abc123", "Test Note")
 
         assert result is None
+
+
+class TestGitManagerDeletedNoteHistory:
+    """Tests for get_history on deleted notes (no path hint, issue #13)."""
+
+    def _make_manager(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "git_enabled", True)
+        monkeypatch.setattr(settings, "git_user_name", "Test User")
+        monkeypatch.setattr(settings, "git_user_email", "test@test.com")
+
+        manager = GitManager(notes_dir=tmp_path)
+        assert manager.repo is not None
+        return manager
+
+    def test_history_for_deleted_nested_note(self, tmp_path, monkeypatch):
+        """create -> update -> delete still yields history without a path hint."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        # Current layout: notes/{category}/{slug}-{uuid}.md
+        note_id = uuid4()
+        category_dir = tmp_path / "notes" / "work"
+        category_dir.mkdir(parents=True)
+        note_path = category_dir / f"test-note-{note_id}.md"
+
+        note_path.write_text("version 1")
+        manager.commit_create(note_id, "Test Note", path=note_path)
+
+        note_path.write_text("version 2")
+        manager.commit_update(note_id, "Test Note", path=note_path)
+
+        note_path.unlink()
+        manager.commit_delete(note_id, "Test Note", path=note_path)
+
+        # Deleted note: caller has no path (get_note_path returns None)
+        history = manager.get_history(note_id, limit=10)
+
+        assert len(history) == 3
+        messages = [v.message for v in history]
+        assert any("Create note" in m for m in messages)
+        assert any("Update note" in m for m in messages)
+        assert any("Delete note" in m for m in messages)
+
+    def test_history_for_unknown_note_returns_empty(self, tmp_path, monkeypatch):
+        """A UUID that never existed returns an empty history."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        # Commit an unrelated note so history is non-empty
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(exist_ok=True)
+        other_id = uuid4()
+        (notes_dir / f"other-{other_id}.md").write_text("content")
+        manager.commit_create(other_id, "Other", path=notes_dir / f"other-{other_id}.md")
+
+        history = manager.get_history(uuid4())
+
+        assert history == []
+
+    def test_find_last_known_path(self, tmp_path, monkeypatch):
+        """_find_last_known_path locates a deleted note's last path."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        note_id = uuid4()
+        category_dir = tmp_path / "notes" / "personal"
+        category_dir.mkdir(parents=True)
+        note_path = category_dir / f"my-note-{note_id}.md"
+
+        note_path.write_text("content")
+        manager.commit_create(note_id, "My Note", path=note_path)
+
+        note_path.unlink()
+        manager.commit_delete(note_id, "My Note", path=note_path)
+
+        found = manager._find_last_known_path(note_id)
+
+        assert found == f"notes/personal/my-note-{note_id}.md"
+
+    def test_find_last_known_path_ignores_uuid_mentions_in_slug(self, tmp_path, monkeypatch):
+        """A note whose slug mentions another note's UUID must not match."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        deleted_id = uuid4()
+        other_id = uuid4()
+        notes_dir = tmp_path / "notes" / "work"
+        notes_dir.mkdir(parents=True)
+
+        # Unrelated note whose filename contains the deleted note's UUID in
+        # its slug portion (canonical UUID is at the end of the filename).
+        decoy_path = notes_dir / f"mentions-{deleted_id}-{other_id}.md"
+        decoy_path.write_text("decoy")
+        manager.commit_create(other_id, "Decoy", path=decoy_path)
+
+        target_path = notes_dir / f"target-{deleted_id}.md"
+        target_path.write_text("target")
+        manager.commit_create(deleted_id, "Target", path=target_path)
+
+        target_path.unlink()
+        manager.commit_delete(deleted_id, "Target", path=target_path)
+
+        found = manager._find_last_known_path(deleted_id)
+
+        assert found == f"notes/work/target-{deleted_id}.md"
+
+        history = manager.get_history(deleted_id)
+        messages = [v.message for v in history]
+        assert all("Decoy" not in m for m in messages)
+        assert any("Create note: Target" in m for m in messages)

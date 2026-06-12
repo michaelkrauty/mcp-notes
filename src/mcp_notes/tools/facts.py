@@ -683,13 +683,22 @@ async def find_connections(
     # Convert to serializable format
     result = []
     for path in paths:
-        # Extract entity chain from path
+        # Rebuild the entity chain direction-aware. The store's BFS is
+        # undirected (a fact may be traversed object->subject), so walk the
+        # path with a cursor starting at the requested source entity and take
+        # the far side of each fact. Comparisons are case-insensitive to match
+        # the BFS's LOWER() entity matching.
         entities: list[str] = []
+        current = source_entity
         for fact in path:
+            if fact.subject.lower() == current.lower():
+                near, far = fact.subject, fact.object_value
+            else:
+                near, far = fact.object_value, fact.subject
             if not entities:
-                entities.append(fact.subject)
-            if fact.object_value not in entities:
-                entities.append(fact.object_value)
+                entities.append(near)
+            entities.append(far)
+            current = far
 
         result.append({
             "path": [

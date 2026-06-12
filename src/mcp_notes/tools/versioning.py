@@ -82,6 +82,11 @@ async def restore_note_version(note_id: str, version_id: str) -> dict:
     if not commit_sha:
         return error_response(ErrorCode.INTERNAL_ERROR, f"Failed to restore version {version_id}")
 
+    # If the store didn't know the note (deleted-note restore), rebuild the
+    # UUID index so the restored file is discoverable again.
+    if current_path is None:
+        store.uuid_index.rebuild()
+
     # Re-index
     try:
         await indexer.index_note(uuid)
