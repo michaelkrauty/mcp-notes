@@ -1,5 +1,6 @@
 """Tests for MCP Notes server module."""
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -18,6 +19,7 @@ from mcp_notes.server import (
     list_notes,
     list_tags,
     read_note,
+    rename_tag,
     search_notes,
     update_note,
 )
@@ -649,6 +651,29 @@ class TestRenameTag:
 
         result = await rename_tag("old-tag", "new-tag")
         assert result["updated_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_rename_tag_onto_existing_tag_no_duplicates(self, tmp_notes_dir, monkeypatch):
+        """Renaming onto a tag the note already has must not duplicate it (issue #13)."""
+        # Stub the indexer so re-indexing doesn't require a live embedding service
+        fake_indexer = AsyncMock()
+
+        async def fake_get_indexer():
+            return fake_indexer
+
+        monkeypatch.setattr("mcp_notes.tools.tags.get_indexer", fake_get_indexer)
+
+        created = await create_note(
+            title="Doubly Tagged",
+            content="Content",
+            tags=["foo", "bar"],
+        )
+
+        result = await rename_tag("foo", "bar")
+        assert result["updated_count"] == 1
+
+        note = await read_note(created["id"])
+        assert note["tags"] == ["bar"]
 
 
 class TestMergeTags:

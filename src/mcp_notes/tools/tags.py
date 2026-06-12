@@ -67,8 +67,13 @@ async def rename_tag(old_tag: str, new_tag: str) -> dict:
     updated = 0
     for summary in store.list_all():
         if old_normalized in summary.tags:
-            # Update tags
-            new_tags = [new_normalized if t == old_normalized else t for t in summary.tags]
+            # Replace old with new without creating duplicates when the note
+            # already has the new tag (mirrors merge_tags' dedupe guard).
+            new_tags: list[str] = []
+            for tag in summary.tags:
+                replacement = new_normalized if tag == old_normalized else tag
+                if replacement not in new_tags:
+                    new_tags.append(replacement)
 
             store.update(
                 note_id=summary.id,
