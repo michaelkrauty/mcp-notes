@@ -12,6 +12,7 @@ from vector_core import validate_limit
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_notes.app import mcp
+from mcp_notes.constants import normalize_tag
 from mcp_notes.singletons import get_search, get_store
 
 
@@ -92,12 +93,12 @@ async def list_notes(
 
     summaries = store.list_all()
 
-    # Filter by tags
+    # Filter by tags (normalized to stored form: lowercase, hyphenated)
     if tags:
-        tags_lower = [t.lower() for t in tags]
+        tags_norm = [t for t in (normalize_tag(t) for t in tags) if t]
         summaries = [
             s for s in summaries
-            if all(t in s.tags for t in tags_lower)
+            if all(t in s.tags for t in tags_norm)
         ]
 
     # Filter by category (exact match or child categories)

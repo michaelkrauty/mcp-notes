@@ -8,6 +8,18 @@ from mcp_notes.settings import settings
 TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
+def normalize_tag(tag: str) -> str:
+    """
+    Normalize a tag to its stored form: lowercase, stripped, spaces to hyphens.
+
+    This is the single source of truth for how a raw tag maps to what is
+    persisted on a note. Tag *filters* (search/list) must normalize through
+    this same function, or a filter like ``"My Tag"`` would never match the
+    stored ``"my-tag"`` and silently return nothing.
+    """
+    return tag.lower().strip().replace(" ", "-")
+
+
 def validate_tag(tag: str) -> tuple[str, str | None]:
     """
     Validate and normalize a tag name.
@@ -18,8 +30,7 @@ def validate_tag(tag: str) -> tuple[str, str | None]:
     Returns:
         Tuple of (normalized_tag, error_message or None)
     """
-    # Normalize: lowercase, strip, replace spaces with hyphens
-    normalized = tag.lower().strip().replace(" ", "-")
+    normalized = normalize_tag(tag)
 
     if not normalized:
         return "", "Tag cannot be empty"

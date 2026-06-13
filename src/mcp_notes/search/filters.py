@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 from qdrant_client.models import FieldCondition, MatchValue
 
+from mcp_notes.constants import normalize_tag
+
 
 @dataclass
 class SearchFilters:
@@ -27,6 +29,18 @@ class SearchFilters:
 
     # Title filter
     title_contains: str | None = None
+
+    def add_tags(self, tags: list[str] | None) -> None:
+        """Add explicit tag filters, normalized to stored form and de-duplicated.
+
+        Mirrors how ``tag:`` query syntax is parsed, so a caller passing
+        ``["Work"]`` filters on the stored ``"work"`` instead of matching
+        nothing. ``None`` and tags that normalize to empty are ignored.
+        """
+        for raw in tags or []:
+            tag = normalize_tag(raw)
+            if tag and tag not in self.tags:
+                self.tags.append(tag)
 
 
 # Filter patterns
@@ -63,16 +77,16 @@ def parse_search_query(query: str) -> SearchFilters:
     """
     filters = SearchFilters()
 
-    # Extract tags
+    # Extract tags (normalized to their stored form so filters match)
     for match in TAG_PATTERN.finditer(query):
-        tag = match.group(1).lower().strip()
+        tag = normalize_tag(match.group(1))
         if tag and tag not in filters.tags:
             filters.tags.append(tag)
     query = TAG_PATTERN.sub("", query)
 
     # Extract excluded tags
     for match in EXCLUDE_TAG_PATTERN.finditer(query):
-        tag = match.group(1).lower().strip()
+        tag = normalize_tag(match.group(1))
         if tag and tag not in filters.exclude_tags:
             filters.exclude_tags.append(tag)
     query = EXCLUDE_TAG_PATTERN.sub("", query)
@@ -125,8 +139,11 @@ def filters_to_qdrant(filters: SearchFilters) -> list:
     """
     conditions = []
 
-    # Tag filters (must have all specified tags)
+    # Tag filters (must have all specified tags). Skip empty tags defensively:
+    # a MatchValue("") matches no stored tag and would filter out every result.
     for tag in filters.tags:
+        if not tag:
+            continue
         conditions.append(
             FieldCondition(key="tags", match=MatchValue(value=tag))
         )
