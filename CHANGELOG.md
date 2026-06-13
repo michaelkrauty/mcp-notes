@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.15] - 2026-06-13
+
+### Fixed
+
+- **Tag filters passed explicitly to `search_notes(tags=[...])` are now normalized to their stored form, so a mixed-case or spaced tag matches instead of silently returning nothing.** Tags are persisted lowercased, stripped, and with spaces collapsed to hyphens, and the `tag:` query-string syntax already normalized to match — but the explicit `tags` parameter was passed straight through to the Qdrant filter, so `search_notes(query="...", tags=["Work"])` filtered on a `"Work"` that no note carries and returned an empty result set. Both paths now share a single `normalize_tag()` helper. `list_notes(tags=[...])` previously only lowercased (missing the strip / space-to-hyphen step) and is normalized the same way. An empty tag can no longer produce a match-nothing Qdrant condition.
+
 ## [1.0.14] - 2026-06-12
 
 ### Fixed

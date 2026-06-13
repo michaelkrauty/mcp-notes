@@ -386,6 +386,19 @@ class TestListNotes:
         assert all("special-tag" in r.get("tags", []) for r in results)
 
     @pytest.mark.asyncio
+    async def test_list_notes_tag_filter_normalizes(self, tmp_notes_dir):
+        """A mixed-case / spaced tag filter is normalized to the stored form."""
+        await create_note(
+            title="Tagged",
+            content="With tag",
+            tags=["special-tag"],
+        )
+        # "Special Tag" normalizes to "special-tag" (lowercase, space->hyphen).
+        results = await list_notes(tags=["Special Tag"])
+        assert len(results) >= 1
+        assert all("special-tag" in r.get("tags", []) for r in results)
+
+    @pytest.mark.asyncio
     async def test_list_notes_category_filter(self, tmp_notes_dir):
         """List notes filters by category."""
         await create_note(
