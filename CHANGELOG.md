@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.16] - 2026-06-13
+
+### Fixed
+
+- **Semantic fact search now covers every fact, not just the 50 most recently modified.** Bumped the shared `vector-core` library to v1.2.6, which fixes `FactIndexer.index_all()` (and `_train_vocabulary()`) to index the complete fact corpus — both previously read facts via `FactStore.list_summaries()`, whose `limit` defaults to 50, so on a store with more than 50 facts the older ones were never embedded into Qdrant and were invisible to semantic fact search (`search_notes(type_filter="fact")`), and the sparse vocabulary was trained on only 50 facts. mcp-notes drives fact indexing (`add_fact`/`reindex_notes`), so this is user-reachable: after a reindex, all facts are searchable and the facts IDF is computed over the full corpus. v1.2.6 also makes incremental fact indexing register the vocabulary from the whole corpus (incremental runs had dropped the facts document count to the size of the batch), reads the corpus before any destructive delete, and skips individual unreadable/malformed facts while letting systemic DB errors fail loud.
+
 ## [1.0.15] - 2026-06-13
 
 ### Fixed
