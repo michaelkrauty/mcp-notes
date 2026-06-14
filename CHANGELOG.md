@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.17] - 2026-06-14
+
+### Fixed
+
+- **`query_facts(subject_type=..., object_type=...)` now matches fact types case-insensitively**, and **`add_fact`/`update_fact` reject an inverted validity range (`valid_from` after `valid_to`)**. Both come from bumping the shared `vector-core` library to v1.2.7. Fact types are stored exactly as given and `add_fact` passes them through unmodified, so a fact added with `subject_type="Person"` was previously invisible to `query_facts(subject_type="person")` while `find_connections`/`get_entity` (which normalize) still found it — the type filters now normalize consistently. An inverted validity interval, which silently made a fact unmatchable by any time-scoped query, is now rejected at creation/update with a clear `INVALID_INPUT` error instead of being stored.
+
 ## [1.0.16] - 2026-06-13
 
 ### Fixed

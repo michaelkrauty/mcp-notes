@@ -1,7 +1,7 @@
 """Integration tests for facts MCP tools."""
 
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -475,3 +475,53 @@ class TestFindConnections:
 
         assert len(result) >= 1
         assert result[0]["entities"] == ["Alice", "Bob"]
+
+
+class TestFactDateRangeValidation:
+    """add_fact/add_facts_batch/update_fact must reject an inverted
+    valid_from>valid_to range with a structured error. vector-core v1.2.7 raises
+    ValueError for it; the tool layer must not surface a generic error or abort a
+    batch (it previously caught only DuplicateFactError around store.create)."""
+
+    @pytest.mark.asyncio
+    async def test_add_fact_rejects_inverted_range(self, temp_fact_store):
+        result = await add_fact(
+            subject="A", predicate="r", object="B",
+            valid_from="2025-01-01", valid_to="2024-01-01",
+        )
+        assert "error_code" in result
+        assert "valid_from" in str(result)
+        assert temp_fact_store.count() == 0
+
+    @pytest.mark.asyncio
+    async def test_add_fact_accepts_ordered_range(self, temp_fact_store):
+        result = await add_fact(
+            subject="A", predicate="r", object="B",
+            valid_from="2024-01-01", valid_to="2025-01-01",
+        )
+        assert "id" in result
+
+    @pytest.mark.asyncio
+    async def test_batch_inverted_item_does_not_abort_others(self, temp_fact_store):
+        facts = [
+            {"subject": "A", "predicate": "r", "object": "B"},
+            {"subject": "C", "predicate": "r", "object": "D",
+             "valid_from": "2025-01-01", "valid_to": "2024-01-01"},
+            {"subject": "E", "predicate": "r", "object": "F"},
+        ]
+        result = await add_facts_batch(facts)
+        assert result["added"] == 2
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["index"] == 1
+        assert "valid_from" in result["errors"][0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_update_fact_rejects_inverting_range(self, temp_fact_store):
+        created = await add_fact(
+            subject="A", predicate="r", object="B", valid_to="2024-01-01",
+        )
+        result = await update_fact(fact_id=created["id"], valid_from="2025-01-01")
+        assert "error_code" in result
+        assert "valid_from" in str(result)
+        # the fact's existing value is untouched
+        assert temp_fact_store.read(UUID(created["id"])).valid_from is None

@@ -6,30 +6,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_vector_core_dependency_is_pinned_to_v1_2_6() -> None:
+def test_vector_core_dependency_is_pinned_to_v1_2_7() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = pyproject["project"]["dependencies"]
 
     vector_specs = [dep for dep in dependencies if dep.startswith("vector-core @ git+")]
 
     assert vector_specs == [
-        "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.6"
+        "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.7"
     ]
 
     uv_sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {})
-    assert uv_sources.get("vector-core", {}).get("tag") == "v1.2.6"
+    assert uv_sources.get("vector-core", {}).get("tag") == "v1.2.7"
 
 
 def test_readme_install_example_uses_current_vector_core_pin() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "vector-core.git@v1.2.6" in readme
+    assert "vector-core.git@v1.2.7" in readme
     assert "mcp-notes.git@v1.0.0" not in readme
 
-def test_project_version_is_v1_0_16() -> None:
+def test_project_version_is_v1_0_17() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert pyproject["project"]["version"] == "1.0.16"
+    assert pyproject["project"]["version"] == "1.0.17"
 
 
 def test_runtime_version_matches_project_metadata() -> None:
