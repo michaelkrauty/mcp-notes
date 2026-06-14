@@ -14,6 +14,7 @@ Tools:
 - get_neighbors: Get immediate neighbors of an entity
 """
 
+from datetime import date
 from uuid import UUID
 
 from vector_core import UNSET, UnsetType, validate_limit
@@ -66,6 +67,22 @@ def _validate_confidence(confidence: object) -> str | None:
         return f"confidence must be a number between 0.0 and 1.0, got {confidence!r}"
     if not 0.0 <= confidence <= 1.0:
         return f"confidence must be between 0.0 and 1.0, got {confidence}"
+    return None
+
+
+def _validate_date_range(valid_from: date | None, valid_to: date | None) -> str | None:
+    """Validate that a validity interval is not inverted.
+
+    Returns an error message if both bounds are set and ``valid_from`` is after
+    ``valid_to`` (which vector-core's FactStore rejects with a ValueError), else
+    ``None``. Preflighting here gives a structured error and keeps a bad item in
+    a batch from aborting the rest.
+    """
+    if valid_from is not None and valid_to is not None and valid_from > valid_to:
+        return (
+            f"valid_from ({valid_from.isoformat()}) must not be after "
+            f"valid_to ({valid_to.isoformat()})"
+        )
     return None
 
 
@@ -147,6 +164,10 @@ async def add_fact(
                 ErrorCode.INVALID_INPUT,
                 f"Invalid valid_to date format: {valid_to}. Use YYYY-MM-DD",
             )
+
+    range_error = _validate_date_range(parsed_valid_from, parsed_valid_to)
+    if range_error:
+        return error_response(ErrorCode.INVALID_INPUT, range_error)
 
     # Build source if provided
     source = None
@@ -273,6 +294,11 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
             except ValueError:
                 errors.append({"index": i, "error": "Invalid valid_to date"})
                 continue
+
+        range_error = _validate_date_range(parsed_valid_from, parsed_valid_to)
+        if range_error:
+            errors.append({"index": i, "error": range_error})
+            continue
 
         # Build source if provided
         source = None
@@ -410,6 +436,11 @@ async def update_fact(
 
     except FactNotFoundError:
         return error_response(ErrorCode.FACT_NOT_FOUND, f"Fact not found: {fact_id}")
+    except ValueError as e:
+        # e.g. the resulting valid_from/valid_to range is inverted. update()
+        # validates the effective range (existing value where not provided), so
+        # this is caught here rather than preflighted at the tool layer.
+        return error_response(ErrorCode.INVALID_INPUT, str(e))
 
 
 @mcp.tool()
