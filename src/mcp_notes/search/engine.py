@@ -145,13 +145,13 @@ class NoteSearchEngine:
         # Parse query filters
         filters = parse_search_query(query)
 
-        # Merge explicit filters with query filters. Explicit tags are
-        # normalized to their stored form (lowercase, hyphenated) — the same
-        # as tag: query syntax — or a caller-supplied "Work"/"my tag" would
-        # silently match nothing.
+        # Merge explicit filters with query filters. Explicit tags and the
+        # category are normalized to their stored form (the same as the
+        # tag:/category: query syntax), or a caller-supplied "Work"/"my tag"
+        # would silently match nothing.
         filters.add_tags(tags)
         if category:
-            filters.category = category
+            filters.set_category(category)
         if after:
             filters.after = parse_iso_datetime(after)
         if before:

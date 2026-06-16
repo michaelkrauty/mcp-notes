@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from qdrant_client.models import FieldCondition, MatchValue
 
 from mcp_notes.constants import normalize_tag
+from mcp_notes.storage.slugify import slugify_category_path
 
 
 @dataclass
@@ -41,6 +42,20 @@ class SearchFilters:
             tag = normalize_tag(raw)
             if tag and tag not in self.tags:
                 self.tags.append(tag)
+
+    def set_category(self, category: str | None) -> None:
+        """Set the category filter, normalized to its stored slug form.
+
+        Categories are slugified before being written to disk (and into the
+        index payload), so a filter must run through the same transform or a
+        caller passing ``"Work & Projects"`` / ``"Finance"`` would never match
+        the stored ``"work-projects"`` / ``"finance"`` and silently return
+        nothing. ``None`` or a value that normalizes to empty clears it.
+        """
+        if not category:
+            self.category = None
+            return
+        self.category = slugify_category_path(category) or None
 
 
 # Filter patterns
@@ -93,7 +108,7 @@ def parse_search_query(query: str) -> SearchFilters:
 
     # Extract category
     if cat_match := CATEGORY_PATTERN.search(query):
-        filters.category = cat_match.group(1).strip()
+        filters.set_category(cat_match.group(1))
     query = CATEGORY_PATTERN.sub("", query)
 
     # Extract after date

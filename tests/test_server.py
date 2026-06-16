@@ -418,6 +418,26 @@ class TestListNotes:
                 assert r["category"].startswith("work")
 
     @pytest.mark.asyncio
+    async def test_list_notes_category_filter_normalizes(self, tmp_notes_dir):
+        """A human-form category filter matches notes stored under the slug.
+
+        Categories are slugified on write ("Work & Projects" -> "work-projects"),
+        so an un-normalized filter previously returned nothing.
+        """
+        await create_note(
+            title="Categorized",
+            content="With category",
+            category="Work & Projects",
+        )
+
+        # Stored slug is "work-projects"; the human form and a case-only
+        # variant must both match.
+        assert len(await list_notes(category="Work & Projects")) == 1
+        slug_results = await list_notes(category="work-projects")
+        assert len(slug_results) == 1
+        assert slug_results[0]["category"] == "work-projects"
+
+    @pytest.mark.asyncio
     async def test_list_notes_invalid_sort_by(self, tmp_notes_dir):
         """An unsupported sort_by returns a clear error instead of silently not sorting."""
         result = await list_notes(sort_by="date")
@@ -785,6 +805,38 @@ class TestMoveCategory:
 
         result = await move_category("old", "new")
         assert result["updated_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_move_category_matches_unslugified_old_path(
+        self, tmp_notes_dir, monkeypatch
+    ):
+        """old_path/new_path are normalized to the stored slug form, so a
+        human-form old_path ("Work & Projects") matches notes stored under
+        "work-projects" instead of silently moving nothing."""
+        from mcp_notes.server import move_category
+
+        # Avoid the embedding-backed reindex (index_all) so the test is
+        # environment independent; it asserts the match/rename logic only.
+        fake_indexer = AsyncMock()
+        monkeypatch.setattr(
+            "mcp_notes.tools.categories.get_indexer",
+            AsyncMock(return_value=fake_indexer),
+        )
+
+        await create_note(
+            title="Note 1",
+            content="Content",
+            category="Work & Projects",
+        )
+
+        result = await move_category("Work & Projects", "Archive")
+        assert result["updated_count"] == 1
+        fake_indexer.index_all.assert_awaited_once()
+
+        # The note now lives under the normalized destination slug.
+        moved = await list_notes(category="archive")
+        assert len(moved) == 1
+        assert moved[0]["category"] == "archive"
 
 
 class TestListNotesSort:

@@ -8,6 +8,7 @@ Tools:
 from mcp_notes.app import mcp
 from mcp_notes.models import CategoryInfo, CategoryTree
 from mcp_notes.singletons import get_git, get_indexer, get_store
+from mcp_notes.storage.slugify import slugify_category_path
 
 
 @mcp.tool()
@@ -53,17 +54,25 @@ async def move_category(old_path: str, new_path: str) -> dict:
     git = get_git()
     indexer = await get_indexer()
 
+    # Normalize to the stored slug form: categories are slugified on write, so
+    # a raw "Work"/"Work & Projects" old_path must be normalized the same way
+    # or it matches nothing and the move silently does nothing. new_path is
+    # normalized too so the rewritten prefix is deterministic (store.update
+    # re-slugifies on write regardless).
+    old_norm = slugify_category_path(old_path)
+    new_norm = slugify_category_path(new_path)
+
     updated = 0
     for summary in store.list_all():
-        if summary.category:
-            # Match exact category OR category that starts with old_path/
+        if summary.category and old_norm:
+            # Match exact category OR category that starts with old_norm/
             # This prevents "work" from matching "work-related"
-            is_exact_match = summary.category == old_path
-            is_child_match = summary.category.startswith(old_path + "/")
+            is_exact_match = summary.category == old_norm
+            is_child_match = summary.category.startswith(old_norm + "/")
 
             if is_exact_match or is_child_match:
-                # Replace prefix
-                new_category = new_path + summary.category[len(old_path):]
+                # Replace prefix (preserve the child suffix)
+                new_category = new_norm + summary.category[len(old_norm):]
 
                 store.update(
                     note_id=summary.id,

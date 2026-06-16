@@ -14,6 +14,7 @@ from vector_core.errors import ErrorCode, error_response
 from mcp_notes.app import mcp
 from mcp_notes.constants import normalize_tag
 from mcp_notes.singletons import get_search, get_store
+from mcp_notes.storage.slugify import slugify_category_path
 
 
 @mcp.tool()
@@ -101,14 +102,17 @@ async def list_notes(
             if all(t in s.tags for t in tags_norm)
         ]
 
-    # Filter by category (exact match or child categories)
-    # "work" matches "work" and "work/projects" but NOT "work-related"
-    if category:
+    # Filter by category (exact match or child categories), normalized to the
+    # stored slug form so a caller passing "Work"/"Finance" matches the stored
+    # "work"/"finance" instead of silently returning nothing. "work" matches
+    # "work" and "work/projects" but NOT "work-related".
+    category_norm = slugify_category_path(category) if category else None
+    if category_norm:
         summaries = [
             s for s in summaries
             if s.category and (
-                s.category == category or
-                s.category.startswith(category + "/")
+                s.category == category_norm or
+                s.category.startswith(category_norm + "/")
             )
         ]
 

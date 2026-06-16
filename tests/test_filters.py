@@ -61,6 +61,16 @@ class TestParseSearchQuery:
         assert result.query == "notes"
         assert result.category == "projects/mcp"
 
+    def test_category_filter_normalized_to_slug(self):
+        """A non-slug category is normalized to its stored slug form, so a
+        ``category:Work`` filter matches the stored ``work`` instead of
+        silently matching nothing (sibling of tag normalization)."""
+        assert parse_search_query("notes category:Work").category == "work"
+        assert (
+            parse_search_query("notes category:Work/ProjectX").category
+            == "work/projectx"
+        )
+
     def test_after_date(self):
         """Query with after date filter."""
         result = parse_search_query("notes after:2024-01-15")
