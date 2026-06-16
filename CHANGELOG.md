@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.18] - 2026-06-15
+
+### Fixed
+
+- **Category filters now match notes stored under a non-slug category instead of silently returning nothing.** Categories are slugified before being written to disk and into the search index (for example `"Work & Projects"` becomes `"work-projects"` and `"Finance"` becomes `"finance"`), but the filters compared the caller's raw input against the stored slug, so `list_notes(category="Finance")`, `search_notes(query="...", category="Finance")`, and the `category:Finance` query syntax all returned an empty result for a category that plainly contains notes. Each filter site now normalizes the category through the same `slugify_category_path()` transform used on write, the same way tag filters were fixed in 1.0.15. `move_category` normalizes its `old_path` and `new_path` too, so renaming a category by its human-readable name now finds and moves the notes rather than reporting zero updates.
+
 ## [1.0.17] - 2026-06-14
 
 ### Fixed
