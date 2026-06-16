@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.19] - 2026-06-15
+
+### Fixed
+
+- **`move_category` now records a category change as a git move, so a note is no longer left in version history at both its old and new paths.** Changing a note's category moves its file on disk (the category is the folder path), but `move_category` committed the change with a plain update that staged only the new path and never removed the old one. The committed tree ended up with the note duplicated at both the old and new category paths, and the working tree was left dirty with an unstaged deletion of the old path. Because a later `delete_note` only removes the note's current path, the stale duplicate survived deletion, and a subsequent `restore_note_version` could resurrect the note at the old category with its pre-move content. `move_category` now detects the path change and commits a git move that stages the removal of the old path, matching how single-note updates have always been committed.
+
 ## [1.0.18] - 2026-06-15
 
 ### Fixed
