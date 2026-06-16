@@ -1,7 +1,7 @@
 """Tests for MCP Notes server module."""
 
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -19,6 +19,7 @@ from mcp_notes.server import (
     list_categories,
     list_notes,
     list_tags,
+    move_category,
     read_note,
     rename_tag,
     restore_note_version,
@@ -837,6 +838,47 @@ class TestMoveCategory:
         moved = await list_notes(category="archive")
         assert len(moved) == 1
         assert moved[0]["category"] == "archive"
+
+    @pytest.mark.asyncio
+    async def test_move_category_records_git_move_not_duplicate(
+        self, tmp_notes_dir, monkeypatch
+    ):
+        """A category move must be committed as a git MOVE, so the note is not
+        left in history at BOTH the old and new paths (which would also leave
+        the working tree dirty with an unstaged deletion of the old path)."""
+        # Skip the embedding-backed reindex so the test is env independent.
+        monkeypatch.setattr(
+            "mcp_notes.tools.categories.get_indexer",
+            AsyncMock(return_value=AsyncMock()),
+        )
+
+        created = await create_note(title="N", content="Body", category="old")
+        note_id = UUID(created["id"])
+
+        result = await move_category("old", "new")
+        assert result["updated_count"] == 1
+
+        # On disk the note lives only under the new category.
+        store = get_store()
+        moved_path = store.get_note_path(note_id)
+        assert moved_path is not None and "/new/" in str(moved_path)
+
+        repo = get_git().repo
+        assert repo is not None  # git is enabled in tests
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        # Committed at the new path only, not duplicated at the old path.
+        assert any("new/" in p for p in md_paths), f"new path missing: {md_paths}"
+        assert not any("old/" in p for p in md_paths), (
+            f"note duplicated in git history: {md_paths}"
+        )
+        # No leftover unstaged deletion of the old path.
+        assert not repo.is_dirty(untracked_files=False), (
+            f"working tree dirty after move: {repo.git.status('--short')}"
+        )
 
 
 class TestListNotesSort:

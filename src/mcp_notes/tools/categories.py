@@ -74,13 +74,28 @@ async def move_category(old_path: str, new_path: str) -> dict:
                 # Replace prefix (preserve the child suffix)
                 new_category = new_norm + summary.category[len(old_norm):]
 
+                old_note_path = store.get_note_path(summary.id)
                 store.update(
                     note_id=summary.id,
                     category=new_category,
                 )
+                new_note_path = store.get_note_path(summary.id)
 
-                note_path = store.get_note_path(summary.id)
-                git.commit_update(summary.id, summary.title, path=note_path)
+                # A category change moves the note's file on disk, so record it
+                # as a git move. Committing it as a plain update would stage the
+                # new path without removing the old, leaving the note in history
+                # at BOTH paths and the working tree dirty with an unstaged
+                # deletion. Mirrors NoteService.update's move detection.
+                if (
+                    old_note_path
+                    and new_note_path
+                    and old_note_path != new_note_path
+                ):
+                    git.commit_move(old_note_path, new_note_path, summary.title)
+                else:
+                    git.commit_update(
+                        summary.id, summary.title, path=new_note_path
+                    )
                 updated += 1
 
     # Re-index all
