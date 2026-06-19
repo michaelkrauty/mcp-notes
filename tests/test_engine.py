@@ -224,6 +224,28 @@ class TestSearch:
         # MatchAny exposes the allowed values via `.any`.
         assert set(getattr(type_conditions[0].match, "any", [])) == {"note", "chunk"}
 
+    async def test_explicit_all_type_filter_is_not_restricted(self, mock_engine):
+        """An explicit type_filter='all' is the documented all-types override:
+        it must NOT add a note/chunk restriction, so glossary and fact points
+        can still be returned. Only the default (type_filter=None) is scoped to
+        note/chunk; 'all' is distinct from the default.
+        """
+        mock_client = mock_engine._mock_client
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_client.query_points.return_value = mock_response
+
+        await mock_engine.search("some query", type_filter="all")
+
+        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
+        query_filter = prefetch[0].filter
+        type_conditions = [
+            c
+            for c in ((query_filter.must if query_filter else []) or [])
+            if getattr(c, "key", None) == "type"
+        ]
+        assert type_conditions == []
+
 
 class TestExtractHighlights:
     """Tests for highlight extraction."""

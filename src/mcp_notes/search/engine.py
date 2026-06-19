@@ -192,13 +192,14 @@ class NoteSearchEngine:
                 qdrant_filters.append(
                     FieldCondition(key="type", match=MatchValue(value="chunk"))
                 )
-            else:  # mode == "both"
+            elif type_filter is None:  # mode == "both", the search_notes default
                 # Restrict to note + chunk. Glossary entries and facts live in
                 # the same collection, so without this they leak into note
                 # results; they have dedicated search_glossary/search_facts
                 # tools and require an explicit type_filter. Mirrors the
                 # note/chunk scoping _filter_only_search applies on the
-                # no-query path.
+                # no-query path. An explicit type_filter="all" intentionally
+                # falls through with no type restriction (all types).
                 qdrant_filters.append(
                     FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))
                 )
