@@ -199,6 +199,53 @@ class TestSearch:
         # Verify query_points was called (search executed)
         mock_client.query_points.assert_called()
 
+    async def test_default_search_restricts_to_notes_and_chunks(self, mock_engine):
+        """search_notes calls search() with the default mode='both' and no
+        type_filter. Notes, glossary entries, and facts share one Qdrant
+        collection, so the query MUST carry a type filter restricting to
+        note/chunk; otherwise glossary and fact points leak into note results.
+        """
+        mock_client = mock_engine._mock_client
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_client.query_points.return_value = mock_response
+
+        # mode defaults to "both", type_filter defaults to None (the
+        # search_notes tool passes neither).
+        await mock_engine.search("some query")
+
+        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
+        query_filter = prefetch[0].filter
+        assert query_filter is not None
+        type_conditions = [
+            c for c in (query_filter.must or []) if getattr(c, "key", None) == "type"
+        ]
+        assert len(type_conditions) == 1
+        # MatchAny exposes the allowed values via `.any`.
+        assert set(getattr(type_conditions[0].match, "any", [])) == {"note", "chunk"}
+
+    async def test_explicit_all_type_filter_is_not_restricted(self, mock_engine):
+        """An explicit type_filter='all' is the documented all-types override:
+        it must NOT add a note/chunk restriction, so glossary and fact points
+        can still be returned. Only the default (type_filter=None) is scoped to
+        note/chunk; 'all' is distinct from the default.
+        """
+        mock_client = mock_engine._mock_client
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_client.query_points.return_value = mock_response
+
+        await mock_engine.search("some query", type_filter="all")
+
+        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
+        query_filter = prefetch[0].filter
+        type_conditions = [
+            c
+            for c in ((query_filter.must if query_filter else []) or [])
+            if getattr(c, "key", None) == "type"
+        ]
+        assert type_conditions == []
+
 
 class TestExtractHighlights:
     """Tests for highlight extraction."""

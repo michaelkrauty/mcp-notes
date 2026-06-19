@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.20] - 2026-06-19
+
+### Fixed
+
+- **`search_notes` no longer returns glossary entries and facts mixed in with note results.** Notes, glossary entries, and facts share a single Qdrant collection, distinguished by a `type` payload. `search_notes` runs the engine with the default `mode="both"` and no `type_filter`, but the semantic-query path only added a `type` restriction for `mode="note"` and `mode="chunk"`, never for `"both"`. With no type condition the query matched every type, so a semantic query could surface `[Glossary]` and `[Fact]` items among the notes (the dedicated `search_glossary` and `search_facts` tools exist for those). The default `mode="both"` case (no `type_filter`) now restricts results to `note` and `chunk` types, matching the scoping the no-query (filter-only) path already applies. An explicit `type_filter="all"` still returns all types unrestricted, and glossary and facts remain searchable through their own tools, which pass an explicit `type_filter`.
+
 ## [1.0.19] - 2026-06-15
 
 ### Fixed
