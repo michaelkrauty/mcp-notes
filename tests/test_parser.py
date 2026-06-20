@@ -192,7 +192,8 @@ Body"""
         """Tags with internal spaces are normalized to the same canonical
         stored form the write path uses (lower + spaces to hyphens), so a
         hand-edited or imported note file stays matchable by tag filters.
-        Empty tags are dropped."""
+        Empty tags are dropped, and tags that canonicalize to the same value
+        (e.g. 'My Tag' and 'my-tag') are coalesced, preserving order."""
         note_id = uuid4()
         content = f"""---
 id: {note_id}
@@ -203,6 +204,7 @@ tags:
   - My Tag
   - Already-Hyphenated
   - "  "
+  - my-tag
 ---
 
 Body"""
