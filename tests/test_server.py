@@ -956,6 +956,37 @@ class TestDeleteUpdateRace:
             f"working tree dirty after delete: {repo.git.status('--short')}"
         )
 
+    @pytest.mark.asyncio
+    async def test_commit_delete_removes_git_tracked_path_when_store_diverged(
+        self, tmp_notes_dir
+    ):
+        """If the store moved the note to a new path but its git move has not
+        committed (the two can diverge mid-rename, even across processes), a
+        deletion against the new path must still remove the path git actually
+        tracks, not silently no-op on an untracked path."""
+        from mcp_notes.server import get_git, get_store
+
+        created = await create_note(title="N", content="Body", category="old")
+        note_id = UUID(created["id"])
+        store = get_store()
+        git = get_git()
+
+        # Move the file in the store only; git still tracks the old path.
+        store.update(note_id=note_id, category="new")
+        new_path = store.get_note_path(note_id)
+
+        # Delete with the (diverged) new path as the hint.
+        sha = git.commit_delete(note_id, "N", path=new_path)
+        assert sha is not None  # a delete commit was actually recorded
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        assert md_paths == [], f"note still committed after delete: {md_paths}"
+
 
 class TestListNotesSort:
     """Tests for list_notes sorting options."""

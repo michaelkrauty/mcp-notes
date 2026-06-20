@@ -165,15 +165,26 @@ __pycache__/
         if repo is None:
             return None
 
-        if path is not None:
-            rel_path = path.relative_to(self.base_dir)
-        else:
-            # Fallback for legacy
-            rel_path = Path("notes") / f"{note_id}.md"
-
         with self._repo_lock:
+            # Remove the path git ACTUALLY tracks for this note. The caller's
+            # path is only a hint: a concurrent rename can leave the filesystem
+            # store and git pointing at different paths (the store moves the file
+            # before the git move commits, possibly in another process), and
+            # git-rm of an untracked path fails silently, leaving the note's blob
+            # committed. The note's UUID is part of its filename, so resolve the
+            # tracked path by UUID and trust the hint only when it is tracked.
+            tracked_paths = {str(entry_path) for entry_path, _stage in repo.index.entries}
+            hint = str(path.relative_to(self.base_dir)) if path is not None else None
+            uuid_str = str(note_id)
+            if hint is not None and hint in tracked_paths:
+                rel_path = hint
+            else:
+                rel_path = next(
+                    (p for p in tracked_paths if uuid_str in p and p.endswith(".md")),
+                    hint or str(Path("notes") / f"{note_id}.md"),
+                )
             try:
-                repo.index.remove([str(rel_path)])
+                repo.index.remove([rel_path])
                 commit = repo.index.commit(f"Delete note: {title}")
                 logger.info(f"Git commit (delete): {commit.hexsha[:8]} - {title}")
                 return commit.hexsha
