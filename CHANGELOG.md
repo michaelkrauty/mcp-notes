@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.22] - 2026-06-19
+
+### Fixed
+
+- **Tags read from a note file are now normalized to the same canonical form the write path uses, so a hand-edited or imported note stays matchable by tag filters.** The write path stores a tag as `lower().strip()` with spaces replaced by hyphens (`normalize_tag`), but `parse_note` only lowercased and stripped, omitting the space-to-hyphen step. A note file whose frontmatter contained a spaced tag (e.g. `My Tag`), from a manual edit, external tooling, or a `git restore` of older content, was parsed as `my tag` instead of the canonical `my-tag`. Tag filters (`list_notes(tags=...)`, `search_notes(tag:...)`/`tags=...`) all normalize the filter to `my-tag`, so the note silently failed to match, and `list_tags` reported a stray `my tag` entry. `parse_note` now normalizes through `normalize_tag` and drops empty tags, matching the write path.
+
 ## [1.0.21] - 2026-06-19
 
 ### Changed
