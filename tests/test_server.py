@@ -964,8 +964,6 @@ class TestDeleteUpdateRace:
         committed (the two can diverge mid-rename, even across processes), a
         deletion against the new path must still remove the path git actually
         tracks, not silently no-op on an untracked path."""
-        from mcp_notes.server import get_git, get_store
-
         created = await create_note(title="N", content="Body", category="old")
         note_id = UUID(created["id"])
         store = get_store()
@@ -986,6 +984,35 @@ class TestDeleteUpdateRace:
             if blob.path.endswith(".md")
         ]
         assert md_paths == [], f"note still committed after delete: {md_paths}"
+
+    @pytest.mark.asyncio
+    async def test_commit_delete_matches_filename_uuid_not_path_substring(
+        self, tmp_notes_dir
+    ):
+        """Resolving the tracked path by UUID must match the filename, not a
+        substring of the whole path: an unrelated note whose category or slug
+        merely contains the target UUID must never be deleted by mistake."""
+        target_id = uuid4()  # a note that is not tracked in git
+        # An unrelated note whose category embeds the target UUID as a substring.
+        other = await create_note(
+            title="Other", content="y", category=f"ref-{target_id}"
+        )
+        other_id = UUID(other["id"])
+        git = get_git()
+
+        # Deleting the (untracked) target must not touch the unrelated note even
+        # though its path contains the target UUID.
+        git.commit_delete(target_id, "Target", path=None)
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        assert any(str(other_id) in p for p in md_paths), (
+            f"unrelated note wrongly deleted: {md_paths}"
+        )
 
 
 class TestListNotesSort:

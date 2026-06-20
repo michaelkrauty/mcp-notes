@@ -175,12 +175,18 @@ __pycache__/
             # tracked path by UUID and trust the hint only when it is tracked.
             tracked_paths = {str(entry_path) for entry_path, _stage in repo.index.entries}
             hint = str(path.relative_to(self.base_dir)) if path is not None else None
-            uuid_str = str(note_id)
             if hint is not None and hint in tracked_paths:
                 rel_path = hint
             else:
+                # Match on the UUID parsed from each filename, not a substring of
+                # the whole path: a different note's slug or category could
+                # otherwise contain this UUID and be deleted by mistake.
                 rel_path = next(
-                    (p for p in tracked_paths if uuid_str in p and p.endswith(".md")),
+                    (
+                        p
+                        for p in tracked_paths
+                        if extract_uuid_from_filename(p.rsplit("/", 1)[-1]) == note_id
+                    ),
                     hint or str(Path("notes") / f"{note_id}.md"),
                 )
             try:
