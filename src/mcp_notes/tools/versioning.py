@@ -80,6 +80,12 @@ async def restore_note_version(note_id: str, version_id: str) -> dict:
     # Restore via git with current path
     commit_sha = git.restore_version(uuid, version_id, title, current_path=current_path)
     if not commit_sha:
+        if git.is_note_deleted_at(uuid, version_id):
+            return error_response(
+                ErrorCode.INVALID_INPUT,
+                f"Version {version_id} is the commit that deleted this note, so it "
+                "has no content to restore. Restore an earlier version instead.",
+            )
         return error_response(ErrorCode.INTERNAL_ERROR, f"Failed to restore version {version_id}")
 
     # If the store didn't know the note (deleted-note restore), rebuild the

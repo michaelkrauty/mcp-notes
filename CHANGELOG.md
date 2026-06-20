@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.23] - 2026-06-20
+
+### Fixed
+
+- **Restoring the commit that deleted a note now returns a clear `INVALID_INPUT` error instead of a generic `INTERNAL_ERROR`.** `get_note_history` lists every commit that touched a note, including the "Delete note: ..." commit, and presents each as a restorable version. Restoring that delete commit could never succeed: the note's content is absent from the delete commit's tree, so the restore aborted and the tool reported `INTERNAL_ERROR` ("Failed to restore version <sha>"), which was misleading because the version id was valid and had been advertised by the history tool. `restore_note_version` now detects this case through a new `GitManager.is_note_deleted_at` helper, which recognizes a deletion commit structurally (the note's blob is absent from the commit but present in its first parent) rather than by matching the commit message, and returns `INVALID_INPUT` explaining that the version is a deletion and an earlier version should be restored instead. A genuinely unknown or malformed version id still returns `INTERNAL_ERROR`. No content is changed; this only improves the error.
+
 ## [1.0.22] - 2026-06-19
 
 ### Fixed

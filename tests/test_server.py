@@ -647,6 +647,29 @@ class TestDeletedNoteRecovery:
         note = await read_note(note_id)
         assert note["title"] == "Recoverable Note"
 
+    @pytest.mark.asyncio
+    async def test_restore_delete_commit_returns_invalid_input(self, tmp_notes_dir):
+        """Restoring the deletion commit itself returns a clear INVALID_INPUT,
+        not a generic INTERNAL_ERROR. The delete commit is advertised by
+        get_note_history but has no content to restore."""
+        created = await create_note(
+            title="Doomed Note",
+            content="Soon to be removed.",
+            category="work",
+        )
+        note_id = created["id"]
+
+        deleted = await delete_note(note_id)
+        assert deleted.get("success") is True
+
+        history = await get_note_history(note_id)
+        # Newest history entry is the deletion commit.
+        assert history[0]["message"].startswith("Delete note")
+
+        result = await restore_note_version(note_id, history[0]["commit_sha"])
+        assert result["error_code"] == "invalid_input"
+        assert "delet" in result["message"].lower()
+
 
 class TestGetNoteLinks:
     """Tests for get_note_links tool."""
