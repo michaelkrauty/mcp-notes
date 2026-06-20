@@ -539,7 +539,7 @@ wheels = [
 
 [[package]]
 name = "mcp-notes"
-version = "1.0.20"
+version = "1.0.21"
 source = { editable = "." }
 dependencies = [
     { name = "gitpython" },
@@ -579,7 +579,7 @@ requires-dist = [
     { name = "qdrant-client", specifier = "~=1.16.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.7" },
+    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.8" },
 ]
 provides-extras = ["dev"]
 
@@ -1253,8 +1253,8 @@ wheels = [
 
 [[package]]
 name = "vector-core"
-version = "1.2.7"
-source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.7#4422da2fc8a15a6afa758e53c40a0a39eddfea2a" }
+version = "1.2.8"
+source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.8#3abab262a2a175cfa203b61e0cacf71690fcaee2" }
 dependencies = [
     { name = "httpx" },
     { name = "pathspec" },
