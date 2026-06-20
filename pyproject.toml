@@ -1,6 +1,6 @@
 [project]
 name = "mcp-notes"
-version = "1.0.23"
+version = "1.0.24"
 description = "MCP server for semantic note management with vector search"
 readme = "README.md"
 license = "Apache-2.0"
