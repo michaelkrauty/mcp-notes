@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.25] - 2026-06-20
+
+### Fixed
+
+- **A note large enough to be split by headers no longer indexes each section's header line twice.** When a note exceeds `max_chunk_chars` it is split into sections by H1/H2 headers. Each section recorded its start line as the header's own line, so the slice that became the section body kept the raw header, and the chunk builder then re-emitted the section title as a header on top of it. The result was the header appearing twice at the start of the chunk (for example `## First` immediately followed by `# First`), and that duplicated text was embedded and tokenized into the search index. Sections now start at the line after their header, so the header appears once. Notes small enough to fit in a single chunk were never affected.
+
 ## [1.0.24] - 2026-06-20
 
 ### Fixed

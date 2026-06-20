@@ -136,10 +136,13 @@ def _split_by_headers(content: str) -> list[dict]:
                 if current_section["content"]:
                     sections.append(current_section)
 
-            # Start new section
+            # Start new section. start_line points at the line AFTER the
+            # header so the header itself is excluded from the section body;
+            # the chunk builder re-emits the title as a header, and keeping the
+            # raw header here would duplicate it in the indexed chunk text.
             current_section = {
                 "title": match.group(2).strip(),
-                "start_line": i,
+                "start_line": i + 1,
                 "end_line": len(lines),
                 "content": "",
             }
