@@ -1,6 +1,7 @@
 """Tests for MCP Notes server module."""
 
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from mcp_notes.server import (
     search_notes,
     update_note,
 )
+from mcp_notes.services.note_service import NoteService
 
 
 class TestResourceManagement:
@@ -904,6 +906,57 @@ class TestMoveCategory:
         )
 
 
+class TestDeleteUpdateRace:
+    """A concurrent rename during delete must not leave the note in git HEAD.
+
+    delete() awaits the index removal, which is a suspension point. If a
+    concurrent update git-moves the note while delete is parked, delete must
+    commit the deletion against the note's current path, not the stale path it
+    saw before the await, or the git rm fails silently and the note's blob
+    stays committed at its new path (a lost delete and a divergent tree).
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_commits_against_current_path_after_concurrent_move(
+        self, tmp_notes_dir
+    ):
+        created = await create_note(title="N", content="Body", category="old")
+        note_id = UUID(created["id"])
+
+        store = get_store()
+        git = get_git()
+
+        async def racing_delete_index(nid):
+            # Simulate a concurrent update that git-moves the note while delete
+            # is awaiting the index removal.
+            old = store.get_note_path(nid)
+            store.update(note_id=nid, category="new")
+            new = store.get_note_path(nid)
+            git.commit_move(old, new, "N")
+
+        service = NoteService(
+            store,
+            git,
+            SimpleNamespace(delete_note_index=racing_delete_index),
+            MagicMock(),
+        )
+
+        result = await service.delete(note_id)
+        assert result.success
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        # The note is fully removed from git HEAD (not stranded at its new path).
+        assert md_paths == [], f"note still committed after delete: {md_paths}"
+        assert not repo.is_dirty(untracked_files=False), (
+            f"working tree dirty after delete: {repo.git.status('--short')}"
+        )
+
+
 class TestListNotesSort:
     """Tests for list_notes sorting options."""
 
@@ -1070,7 +1123,7 @@ class TestValidationFunctions:
 
     def test_validate_limit_clamps_low(self):
         """validate_limit clamps to minimum."""
-        from vector_core import DEFAULT_MIN_LIMIT, validate_limit
+        from vector_core import validate_limit
 
         result = validate_limit(-1)
         assert result == 10  # Default when <=0

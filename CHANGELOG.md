@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.27] - 2026-06-20
+
+### Fixed
+
+- **Deleting a note while a concurrent rename moves it no longer leaves the note committed in git history.** `delete()` removes the note from the search index with an `await`, which is a suspension point. It captured the note's path *before* that await and then committed the deletion against it. If a concurrent `update` that changes the note's category or title git-moved the note while `delete` was parked, the deletion was committed against the stale old path, so `git rm` failed (the old path was no longer tracked), the error was swallowed, and no delete commit was recorded. The note was gone from disk and the index but its blob remained committed at the new path (a lost delete and a divergent working tree, from which a `git checkout` could resurrect it). `delete()` now resolves the path after the index await, just before the synchronous delete and commit, so it always commits against the note's current path.
+
 ## [1.0.26] - 2026-06-20
 
 ### Changed
