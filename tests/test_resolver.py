@@ -409,6 +409,34 @@ class TestGetOrphanNotes:
         assert len(result) == 1
         assert result[0].id == orphan_id
 
+    def test_self_link_in_body_is_not_an_incoming_link(self):
+        """A note linking to itself in its body is still an orphan when nothing
+        else links to it. A self-reference is not a meaningful incoming link."""
+        note_id = uuid4()
+        mock_store = make_mock_note_store()
+        self_note = make_parsed_note(note_id=note_id, body=f"see [[{note_id}]]")
+        mock_store.iter_all.return_value = iter([(self_note, None)])
+
+        resolver = LinkResolver(note_store=mock_store)
+        result = resolver.get_orphan_notes()
+
+        assert len(result) == 1
+        assert result[0].id == note_id
+
+    def test_self_link_in_frontmatter_is_not_an_incoming_link(self):
+        """A note whose frontmatter links list contains its own id is still an
+        orphan when nothing else links to it."""
+        note_id = uuid4()
+        mock_store = make_mock_note_store()
+        self_note = make_parsed_note(note_id=note_id, links=[note_id])
+        mock_store.iter_all.return_value = iter([(self_note, None)])
+
+        resolver = LinkResolver(note_store=mock_store)
+        result = resolver.get_orphan_notes()
+
+        assert len(result) == 1
+        assert result[0].id == note_id
+
 
 class TestValidateLink:
     """Tests for validate_link method."""

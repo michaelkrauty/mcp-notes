@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.24] - 2026-06-20
+
+### Fixed
+
+- **`get_orphan_notes` (and the orphan count in the note health report) no longer treats a note's link to itself as an incoming link.** An orphan is a note with no incoming links. When building the set of linked-to note ids, the scan unioned every note's frontmatter links and inline `[[uuid]]` body links without excluding the note's own id, so a note that referenced itself (an inline `[[<own-uuid>]]` or its own id in frontmatter links) added itself to that set and was excluded from the orphan list even when no other note linked to it. The scan now discards each note's own id from its outgoing links before recording them, mirroring `_find_backlinks`, which already skips self-references. Genuine cross-note links are unaffected.
+
 ## [1.0.23] - 2026-06-20
 
 ### Fixed

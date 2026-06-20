@@ -170,8 +170,12 @@ class LinkResolver:
 
         for parsed, category in self.note_store.iter_all():
             all_parsed.append((parsed, category))
-            linked_to.update(parsed.links)
-            linked_to.update(extract_inline_links(parsed.body))
+            # A note's links to itself are not incoming links, so exclude its
+            # own id before recording the targets (mirrors _find_backlinks,
+            # which skips parsed.id == note_id).
+            outgoing = set(parsed.links) | set(extract_inline_links(parsed.body))
+            outgoing.discard(parsed.id)
+            linked_to.update(outgoing)
 
         # Find notes not in linked_to set using already-parsed data
         orphans = [
