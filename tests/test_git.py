@@ -742,6 +742,34 @@ class TestGitManagerDeletedNoteHistory:
         assert any("Update note" in m for m in messages)
         assert any("Delete note" in m for m in messages)
 
+    def test_is_note_deleted_at_distinguishes_delete_commit(self, tmp_path, monkeypatch):
+        """is_note_deleted_at flags the delete commit, not the create commit or
+        an unknown SHA."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+
+        note_id = uuid4()
+        category_dir = tmp_path / "notes" / "work"
+        category_dir.mkdir(parents=True)
+        note_path = category_dir / f"test-note-{note_id}.md"
+
+        note_path.write_text("version 1")
+        manager.commit_create(note_id, "Test Note", path=note_path)
+
+        note_path.unlink()
+        manager.commit_delete(note_id, "Test Note", path=note_path)
+
+        history = manager.get_history(note_id, limit=10)
+        delete_sha = history[0].commit_sha  # newest entry is the deletion
+        create_sha = history[-1].commit_sha  # oldest entry is the creation
+
+        assert manager.is_note_deleted_at(note_id, delete_sha) is True
+        assert manager.is_note_deleted_at(note_id, create_sha) is False
+        # An unknown SHA is not a deletion of this note.
+        assert manager.is_note_deleted_at(note_id, "0" * 40) is False
+        # The underlying restore still aborts on the delete commit (no content).
+        assert manager.get_version_content(note_id, delete_sha) is None
+        assert manager.restore_version(note_id, delete_sha, "Test Note") is None
+
     def test_history_for_unknown_note_returns_empty(self, tmp_path, monkeypatch):
         """A UUID that never existed returns an empty history."""
         manager = self._make_manager(tmp_path, monkeypatch)

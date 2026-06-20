@@ -456,6 +456,46 @@ __pycache__/
             logger.warning(f"Failed to get version content: {e}")
             return None
 
+    def is_note_deleted_at(self, note_id: UUID, commit_sha: str) -> bool:
+        """Whether ``commit_sha`` is the commit that deleted this note.
+
+        True when the commit resolves, the note's blob is absent from its tree,
+        but is present in its first parent's tree. This is message-independent:
+        it does not rely on the "Delete note: ..." commit subject, which a user
+        could reproduce in an ordinary note title.
+
+        Lets the tool layer tell "you asked to restore the deletion commit
+        itself" (a clear user error) apart from a genuinely unknown version.
+
+        Args:
+            note_id: Note UUID
+            commit_sha: Git commit SHA advertised by get_history
+
+        Returns:
+            True if the commit removed the note, False otherwise
+        """
+        repo = self.repo
+        if repo is None:
+            return False
+
+        # GitPython resolves commits lazily, so a bad SHA only raises when the
+        # tree/parents are first accessed: force that inside the try.
+        try:
+            commit = repo.commit(commit_sha)
+            present_now = self._find_note_path_in_tree(commit, note_id) is not None
+            parents = list(commit.parents)
+        except (BadName, GitCommandError, ValueError) as e:
+            logger.debug(f"Cannot resolve commit {commit_sha}: {e}")
+            return False
+
+        # Blob present in this commit -> it did not delete the note.
+        if present_now:
+            return False
+        # Absent here but present in the first parent -> this commit removed it.
+        if not parents:
+            return False
+        return self._find_note_path_in_tree(parents[0], note_id) is not None
+
     def restore_version(
         self,
         note_id: UUID,
