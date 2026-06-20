@@ -93,6 +93,30 @@ Content for section two with more text here."""
 
         assert len(chunks) >= 2
 
+    @patch("mcp_notes.indexing.chunker.settings")
+    def test_header_not_duplicated_in_split_chunks(self, mock_settings):
+        """When a large note is split by headers, the section header must not
+        appear twice in any chunk (once from the chunk builder's title line and
+        once from the raw header left in the section body)."""
+        mock_settings.max_chunk_chars = 100
+        mock_settings.section_overlap_chars = 20
+
+        body = """# Section One
+
+Content for section one with enough text.
+
+# Section Two
+
+Content for section two with more text here."""
+
+        parsed = make_parsed_note(body)
+
+        chunks = chunk_note(parsed)
+
+        for chunk in chunks:
+            assert "## Section One\n# Section One" not in chunk.content
+            assert "## Section Two\n# Section Two" not in chunk.content
+
     def test_chunk_has_correct_note_id(self):
         """All chunks have correct note_id."""
         parsed = make_parsed_note("Content here")
@@ -145,6 +169,25 @@ Content two."""
         assert len(sections) == 2
         assert sections[0]["title"] == "First"
         assert sections[1]["title"] == "Second"
+
+    def test_section_content_excludes_its_own_header(self):
+        """A section's content must not contain its own header line. The chunk
+        builder re-emits the section title as a header, so keeping the raw
+        header in the body duplicates it in the indexed, searchable chunk."""
+        content = """# First
+
+Content one.
+
+# Second
+
+Content two."""
+
+        sections = _split_by_headers(content)
+
+        assert not sections[0]["content"].lstrip().startswith("# First")
+        assert "Content one." in sections[0]["content"]
+        assert not sections[1]["content"].lstrip().startswith("# Second")
+        assert "Content two." in sections[1]["content"]
 
     def test_h2_headers(self):
         """H2 headers create sections."""
