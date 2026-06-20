@@ -8,6 +8,8 @@ from uuid import UUID
 
 import yaml
 
+from mcp_notes.constants import normalize_tag
+
 logger = logging.getLogger(__name__)
 
 # Maximum frontmatter size in bytes (prevents memory exhaustion DoS)
@@ -108,7 +110,11 @@ def parse_note(file_content: str) -> ParsedNote:  # noqa: PLR0912
     tags = frontmatter.get("tags", [])
     if not isinstance(tags, list):
         tags = [tags] if tags else []
-    tags = [str(t).lower().strip() for t in tags]
+    # Normalize through the single source of truth so a hand-edited or imported
+    # note file produces the same canonical stored form (lower, spaces to
+    # hyphens) the write path uses; otherwise a spaced tag like "My Tag" would
+    # parse as "my tag" and never match a "my-tag" tag filter. Drop empties.
+    tags = [n for n in (normalize_tag(str(t)) for t in tags) if n]
 
     category = frontmatter.get("category")
     if category:

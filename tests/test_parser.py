@@ -188,6 +188,28 @@ Body"""
         parsed = parse_note(content)
         assert parsed.tags == ["uppercase", "mixedcase"]
 
+    def test_tags_normalized_to_canonical_form(self):
+        """Tags with internal spaces are normalized to the same canonical
+        stored form the write path uses (lower + spaces to hyphens), so a
+        hand-edited or imported note file stays matchable by tag filters.
+        Empty tags are dropped."""
+        note_id = uuid4()
+        content = f"""---
+id: {note_id}
+title: Test
+created: 2024-01-15T00:00:00Z
+modified: 2024-01-15T00:00:00Z
+tags:
+  - My Tag
+  - Already-Hyphenated
+  - "  "
+---
+
+Body"""
+
+        parsed = parse_note(content)
+        assert parsed.tags == ["my-tag", "already-hyphenated"]
+
     def test_invalid_link_uuids_skipped(self):
         """Invalid UUIDs in links are skipped."""
         note_id = uuid4()
