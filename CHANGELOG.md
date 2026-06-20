@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.28] - 2026-06-20
+
+### Fixed
+
+- Bump vector-core to v1.2.10, which fixes `find_connections` (the `find_connections` notes tool) duplicating an entity reachable through several facts at the maximum depth and crowding out other distinct reachable entities at the result limit.
+
 ## [1.0.27] - 2026-06-20
 
 ### Fixed
