@@ -1,6 +1,6 @@
 [project]
 name = "mcp-notes"
-version = "1.0.25"
+version = "1.0.26"
 description = "MCP server for semantic note management with vector search"
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "mcp~=1.25.0",
-    "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.8",
+    "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.9",
     "pyyaml~=6.0",
     "gitpython~=3.1",
     "pydantic~=2.0",
@@ -53,7 +53,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.uv.sources]
-vector-core = { git = "https://github.com/michaelkrauty/vector-core", tag = "v1.2.8" }
+vector-core = { git = "https://github.com/michaelkrauty/vector-core", tag = "v1.2.9" }
 
 [tool.mypy]
 python_version = "3.12"

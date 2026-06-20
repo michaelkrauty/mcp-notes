@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.26] - 2026-06-20
+
+### Changed
+
+- Bumped `vector-core` to `v1.2.9`. This improves fuzzy query-token matching: vector-core no longer caps fuzzy match candidates before scoring, so a typo or rare token in a note search reliably finds its closest vocabulary term instead of occasionally missing it on a large vocabulary (`vectorize_query`, which the search path uses, has fuzzy on by default). v1.2.9 also makes `FactStore.update_source_status` refuse an unscoped (no-selector) status reset; mcp-notes already guards this at its `revalidate_fact_sources` tool, so this is defense in depth. The v1.2.9 query field-prefix parser fix is not exercised here.
+
 ## [1.0.25] - 2026-06-20
 
 ### Fixed
