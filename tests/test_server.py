@@ -1,6 +1,7 @@
 """Tests for MCP Notes server module."""
 
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from mcp_notes.server import (
     search_notes,
     update_note,
 )
+from mcp_notes.services.note_service import NoteService
 
 
 class TestResourceManagement:
@@ -904,6 +906,115 @@ class TestMoveCategory:
         )
 
 
+class TestDeleteUpdateRace:
+    """A concurrent rename during delete must not leave the note in git HEAD.
+
+    delete() awaits the index removal, which is a suspension point. If a
+    concurrent update git-moves the note while delete is parked, delete must
+    commit the deletion against the note's current path, not the stale path it
+    saw before the await, or the git rm fails silently and the note's blob
+    stays committed at its new path (a lost delete and a divergent tree).
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_commits_against_current_path_after_concurrent_move(
+        self, tmp_notes_dir
+    ):
+        created = await create_note(title="N", content="Body", category="old")
+        note_id = UUID(created["id"])
+
+        store = get_store()
+        git = get_git()
+
+        async def racing_delete_index(nid):
+            # Simulate a concurrent update that git-moves the note while delete
+            # is awaiting the index removal.
+            old = store.get_note_path(nid)
+            store.update(note_id=nid, category="new")
+            new = store.get_note_path(nid)
+            git.commit_move(old, new, "N")
+
+        service = NoteService(
+            store,
+            git,
+            SimpleNamespace(delete_note_index=racing_delete_index),
+            MagicMock(),
+        )
+
+        result = await service.delete(note_id)
+        assert result.success
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        # The note is fully removed from git HEAD (not stranded at its new path).
+        assert md_paths == [], f"note still committed after delete: {md_paths}"
+        assert not repo.is_dirty(untracked_files=False), (
+            f"working tree dirty after delete: {repo.git.status('--short')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_commit_delete_removes_git_tracked_path_when_store_diverged(
+        self, tmp_notes_dir
+    ):
+        """If the store moved the note to a new path but its git move has not
+        committed (the two can diverge mid-rename, even across processes), a
+        deletion against the new path must still remove the path git actually
+        tracks, not silently no-op on an untracked path."""
+        created = await create_note(title="N", content="Body", category="old")
+        note_id = UUID(created["id"])
+        store = get_store()
+        git = get_git()
+
+        # Move the file in the store only; git still tracks the old path.
+        store.update(note_id=note_id, category="new")
+        new_path = store.get_note_path(note_id)
+
+        # Delete with the (diverged) new path as the hint.
+        sha = git.commit_delete(note_id, "N", path=new_path)
+        assert sha is not None  # a delete commit was actually recorded
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        assert md_paths == [], f"note still committed after delete: {md_paths}"
+
+    @pytest.mark.asyncio
+    async def test_commit_delete_matches_filename_uuid_not_path_substring(
+        self, tmp_notes_dir
+    ):
+        """Resolving the tracked path by UUID must match the filename, not a
+        substring of the whole path: an unrelated note whose category or slug
+        merely contains the target UUID must never be deleted by mistake."""
+        target_id = uuid4()  # a note that is not tracked in git
+        # An unrelated note whose category embeds the target UUID as a substring.
+        other = await create_note(
+            title="Other", content="y", category=f"ref-{target_id}"
+        )
+        other_id = UUID(other["id"])
+        git = get_git()
+
+        # Deleting the (untracked) target must not touch the unrelated note even
+        # though its path contains the target UUID.
+        git.commit_delete(target_id, "Target", path=None)
+
+        repo = git.repo
+        md_paths = [
+            blob.path
+            for blob in repo.head.commit.tree.traverse()
+            if blob.path.endswith(".md")
+        ]
+        assert any(str(other_id) in p for p in md_paths), (
+            f"unrelated note wrongly deleted: {md_paths}"
+        )
+
+
 class TestListNotesSort:
     """Tests for list_notes sorting options."""
 
@@ -1070,7 +1181,7 @@ class TestValidationFunctions:
 
     def test_validate_limit_clamps_low(self):
         """validate_limit clamps to minimum."""
-        from vector_core import DEFAULT_MIN_LIMIT, validate_limit
+        from vector_core import validate_limit
 
         result = validate_limit(-1)
         assert result == 10  # Default when <=0

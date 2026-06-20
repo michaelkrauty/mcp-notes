@@ -225,10 +225,18 @@ class NoteService:
         try:
             # Get note info for commit message
             note = self._store.read(note_id)
-            note_path = self._store.get_note_path(note_id)
 
             # Remove from index first (so search doesn't return deleted note)
             await self._safe_delete_index(note_id)
+
+            # Resolve the path AFTER the index await, which is the only
+            # suspension point in this method. A concurrent rename (e.g. an
+            # update that changes the note's category or title) could git-move
+            # the note while we are parked here; committing the deletion against
+            # the stale pre-await path would fail silently and leave the note's
+            # blob in git history at its new path. Reading it now, just before
+            # the synchronous delete and commit, keeps it consistent.
+            note_path = self._store.get_note_path(note_id)
 
             # Delete from store
             self._store.delete(note_id)
