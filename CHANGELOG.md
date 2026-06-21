@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.34] - 2026-06-20
+
+### Fixed
+
+- **Hybrid search no longer silently drops matching results when `limit` is large.** The post-fusion fetch size scales with the requested limit (3x, to survive post-filtering), but the per-modality prefetch pool was a fixed `rrf_prefetch_limit` (50). RRF fusion only ranks the union of the two prefetch candidate lists, so once the limit approached or exceeded 50 the fusion stage was starved of candidates and returned fewer results than requested even though more notes genuinely matched (e.g. `search_notes(query=..., limit=80)` could return ~73). The prefetch pool now scales to at least the post-fusion fetch size, so fusion can return up to the requested limit. `search_notes`, `search_glossary`, and `search_facts` (which share the hybrid path) now also enforce their documented maximum limit of 100, bounding the prefetch fan-out.
+
 ## [1.0.33] - 2026-06-20
 
 ### Fixed

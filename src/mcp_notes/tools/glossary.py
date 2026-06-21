@@ -195,7 +195,7 @@ async def search_glossary(
     """
     try:
         search = await get_search()
-        limit = validate_limit(limit, default=10)
+        limit = validate_limit(limit, default=10, maximum=100)
 
         # Search with glossary type filter
         results = await search.search(

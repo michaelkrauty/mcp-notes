@@ -132,3 +132,25 @@ class TestExplicitTagNormalization:
         await mock_engine.search("meeting tag:work", tags=["Work"])
 
         assert _tags_in_query_points(mock_client).count("work") == 1
+
+
+class TestHybridPrefetchScaling:
+    """The per-modality prefetch pool must scale with the requested limit, so a
+    large limit is not silently capped at rrf_prefetch_limit candidates and
+    fusion is not starved of results that genuinely match."""
+
+    async def test_large_limit_scales_prefetch_pool(self, mock_engine):
+        mock_client = mock_engine._mock_client
+        response = MagicMock()
+        response.points = []
+        mock_client.query_points.return_value = response
+
+        await mock_engine.search("project", limit=80)
+
+        call = mock_client.query_points.call_args
+        prefetch = call.kwargs["prefetch"]
+        fetch_limit = call.kwargs["limit"]
+        assert fetch_limit >= 80
+        # Each modality must fetch at least the post-fusion need.
+        for branch in prefetch:
+            assert branch.limit >= fetch_limit
