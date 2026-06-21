@@ -48,7 +48,7 @@ async def search_notes(
         List of search results
     """
     search = await get_search()
-    limit = validate_limit(limit, default=10)
+    limit = validate_limit(limit, default=10, maximum=100)
 
     results = await search.search(
         query=query,

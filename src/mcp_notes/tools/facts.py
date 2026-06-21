@@ -639,7 +639,7 @@ async def search_facts(
     Returns:
         List of matching facts with scores
     """
-    limit = validate_limit(limit, 10)
+    limit = validate_limit(limit, 10, maximum=100)
 
     # Use search engine with type_filter="fact"
     engine = await get_search()

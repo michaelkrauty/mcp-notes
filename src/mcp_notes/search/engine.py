@@ -214,11 +214,17 @@ class NoteSearchEngine:
 
         # Get Qdrant client and set up search parameters
         client = await self.storage.get_client()
-        prefetch_limit = settings.rrf_prefetch_limit
 
         # Fetch extra results to account for post-filtering (date ranges, exclude_tags)
         # Use 3x multiplier + buffer to handle cases where many results are filtered
         fetch_limit = max(limit * 3, limit + 20)
+
+        # The per-modality prefetch pool must be at least as large as the
+        # post-fusion fetch_limit. Otherwise a large limit is silently capped at
+        # the fixed rrf_prefetch_limit candidates per modality, so RRF fusion is
+        # starved and returns fewer results than requested even when more notes
+        # genuinely match.
+        prefetch_limit = max(settings.rrf_prefetch_limit, fetch_limit)
 
         # Try hybrid search with graceful degradation to sparse-only
         degraded = False
