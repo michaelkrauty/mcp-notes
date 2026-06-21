@@ -134,9 +134,16 @@ class NoteIndexer:
             indexed = await self._get_indexed_hashes()
         else:
             indexed = {}
-            # Clear collection
-            await self.storage.delete_collection(self.collection_name)
-            await self.storage.create_collection(self.collection_name)
+            # Clear only this subsystem's points. Notes, chunks, glossary
+            # entries, and facts share one Qdrant collection, so deleting and
+            # recreating the whole collection would destroy the glossary and fact
+            # points (the glossary has no notes-side rebuild path). The collection
+            # is already ensured above; scope the clear to note/chunk points,
+            # mirroring FactIndexer._delete_all_fact_points.
+            await self.storage.delete_by_filter(self.collection_name, "type", "note")
+            await self.storage.delete_by_filter(
+                self.collection_name, "type", "chunk"
+            )
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)

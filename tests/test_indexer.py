@@ -214,7 +214,13 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force(self):
-        """Force reindex clears collection."""
+        """Force reindex scopes its clear to note/chunk points.
+
+        Notes, chunks, glossary entries, and facts share one Qdrant collection,
+        so force must not delete and recreate the whole collection (which would
+        destroy the glossary and fact points, with no notes-side rebuild). It
+        clears only the note and chunk points, mirroring the facts indexer.
+        """
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_store.iter_all.return_value = iter([])
@@ -229,8 +235,15 @@ class TestNoteIndexerIndexAll:
 
         await indexer.index_all(force=True)
 
-        mock_storage.delete_collection.assert_called_once()
-        mock_storage.create_collection.assert_called_once()
+        # Must NOT nuke the shared collection (would destroy glossary + facts).
+        mock_storage.delete_collection.assert_not_called()
+        # Clears only the note and chunk points.
+        cleared = {
+            (c.args[1], c.args[2])
+            for c in mock_storage.delete_by_filter.call_args_list
+        }
+        assert ("type", "note") in cleared
+        assert ("type", "chunk") in cleared
 
     @pytest.mark.asyncio
     async def test_index_all_partial_failure_accounting(self):
@@ -339,7 +352,7 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force_skips_orphan_pruning(self):
-        """Force mode recreates the collection, so it does not scan for orphans."""
+        """Force mode clears all note/chunk points, so it does not scan for orphans."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         parsed = MagicMock()
