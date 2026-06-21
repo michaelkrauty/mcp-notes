@@ -47,6 +47,10 @@ def _validate_entity_name(name: str, field: str = "entity") -> str | dict:
     Returns:
         Validated name (stripped) or error dict
     """
+    if not isinstance(name, str):
+        # Batch facts come in as list[dict], whose values are not type-coerced
+        # by the tool schema, so guard before calling string methods.
+        return error_response(ErrorCode.INVALID_INPUT, f"{field} must be a string")
     if not name or not name.strip():
         return error_response(ErrorCode.INVALID_INPUT, f"{field} cannot be empty")
     if len(name) > MAX_ENTITY_NAME_LENGTH:

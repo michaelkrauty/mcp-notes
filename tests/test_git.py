@@ -354,6 +354,25 @@ class TestGitManagerGetVersionContent:
 
         assert content == "original content"
 
+    def test_content_unresolvable_hex_sha_returns_none(self, tmp_path, monkeypatch):
+        """A syntactically valid 40-hex SHA that names no object must return None,
+        not raise (GitPython raises a bare ValueError for an unresolvable hex
+        SHA, which get_version_content must catch like is_note_deleted_at does)."""
+        monkeypatch.setattr(settings, "git_enabled", True)
+        monkeypatch.setattr(settings, "git_user_name", "Test")
+        monkeypatch.setattr(settings, "git_user_email", "test@test.com")
+
+        manager = GitManager(notes_dir=tmp_path)
+        note_id = uuid4()
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(exist_ok=True)
+        (notes_dir / f"{note_id}.md").write_text("content")
+        manager.commit_create(note_id, "Test")
+
+        # 40 valid hex chars that name no object in the repo.
+        result = manager.get_version_content(note_id, "de" * 20)
+        assert result is None
+
     def test_content_invalid_sha(self, tmp_path, monkeypatch):
         """Returns None for invalid commit SHA."""
         from mcp_notes.settings import settings

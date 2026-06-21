@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.33] - 2026-06-20
+
+### Fixed
+
+- **`restore_note_version` no longer raises an unhandled error for a syntactically valid but unknown commit SHA.** Resolving a 40-character hex SHA that names no object in the repository raises a bare `ValueError` from GitPython, which `get_version_content` did not catch (it caught only malformed-ref errors), so the tool surfaced an internal exception instead of the documented clean error response. It now returns the same `INTERNAL_ERROR` ("Failed to restore version ...") for an unknown valid-hex SHA as it already did for a malformed one, matching the sibling history method.
+- **`add_facts_batch` no longer crashes on a non-string field, and reports it as a per-item error instead.** Batch facts arrive as a list of dicts whose values are not type-coerced, so a non-string `subject`, `predicate`, `object`, or type field reached the entity-name validator and raised an `AttributeError`, aborting the whole batch after some facts had already been committed and returning no accounting. The validator now rejects non-strings with a clear error, which the batch loop records in `errors[]` and skips, so valid facts in the same batch are still added and the documented summary is returned.
+
 ## [1.0.32] - 2026-06-20
 
 ### Fixed

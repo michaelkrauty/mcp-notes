@@ -199,6 +199,25 @@ class TestAddFactsBatch:
         assert len(result["errors"]) == 1
         assert result["errors"][0]["index"] == 1
 
+    @pytest.mark.asyncio
+    async def test_add_batch_non_string_field_reports_error_not_crash(
+        self, temp_fact_store
+    ):
+        """A non-string subject/predicate/object (the batch's list[dict] values
+        are not schema-coerced) must be reported in errors[] and the item
+        skipped, not crash the whole batch after partial commits."""
+        result = await add_facts_batch(
+            [
+                {"subject": "Alice", "predicate": "knows", "object": "Bob"},
+                {"subject": 42, "predicate": "knows", "object": "Carol"},
+                {"subject": "Dave", "predicate": "knows", "object": "Eve"},
+            ]
+        )
+
+        assert result["added"] == 2  # Alice/Bob and Dave/Eve still added
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["index"] == 1
+
 
 class TestUpdateFact:
     """Tests for update_fact tool."""

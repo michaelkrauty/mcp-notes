@@ -439,7 +439,10 @@ __pycache__/
 
         try:
             commit = repo.commit(commit_sha)
-        except (BadName, GitCommandError) as e:
+        except (BadName, GitCommandError, ValueError) as e:
+            # GitPython raises a bare ValueError for a syntactically valid hex
+            # SHA that resolves to no object, in addition to BadName for a
+            # malformed ref (mirrors is_note_deleted_at's handling).
             logger.warning(f"Failed to get commit: {e}")
             return None
 
