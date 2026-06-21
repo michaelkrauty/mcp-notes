@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.32] - 2026-06-20
+
+### Fixed
+
+- **Updating a note's tags, title, or category no longer drops its frontmatter-only links.** An update rebuilt the note's links from the inline `[[uuid]]` references in the body, so when a note had a link in its frontmatter `links` list with no matching inline reference (a hand-edited or imported note), any update that did not change the body silently removed that link. Because backlink, orphan, and broken-link resolution treat frontmatter links as real edges, a single `rename_tag`, `merge_tags`, or `move_category` could strip those edges across every note carrying the affected tag, and a note could even flip to "orphan". An update that leaves the body unchanged now preserves the existing frontmatter links alongside any inline ones.
+
 ## [1.0.31] - 2026-06-20
 
 ### Fixed

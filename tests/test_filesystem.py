@@ -10,6 +10,7 @@ from mcp_notes.storage.filesystem import (
     NoteStore,
     _atomic_write,
 )
+from mcp_notes.storage.parser import parse_note, serialize_note
 
 
 class TestAtomicWrite:
@@ -248,6 +249,39 @@ class TestNoteStoreUpdate:
         updated = store.update(note.id, content="New content")
 
         assert "New content" in updated.content
+
+    def test_update_preserves_frontmatter_only_links(self, tmp_path):
+        """A content-less update must not drop frontmatter `links` that have no
+        inline [[uuid]] counterpart. The read side treats frontmatter links as
+        live edges, so a hand-edited/imported note's links must survive a
+        tags/title/category update (which rebuilds links from the body only)."""
+        store = NoteStore(notes_dir=tmp_path)
+        note = store.create(title="B", content="a body with no inline link")
+        target = uuid4()
+
+        # Hand-edit B's file: add a frontmatter link to `target`, body unchanged
+        # (no inline [[target]]), as an imported/hand-edited note would have.
+        path = store.get_note_path(note.id)
+        parsed = parse_note(path.read_text(encoding="utf-8"))
+        path.write_text(
+            serialize_note(
+                note_id=note.id,
+                title=parsed.title,
+                body=parsed.body,
+                tags=parsed.tags or None,
+                category=None,
+                links=[target],
+                created=parsed.created,
+                modified=parsed.modified,
+            ),
+            encoding="utf-8",
+        )
+
+        # A content-less update (tags only) must preserve the frontmatter link.
+        store.update(note.id, tags=["x"])
+
+        reparsed = parse_note(store.get_note_path(note.id).read_text(encoding="utf-8"))
+        assert target in reparsed.links
 
     def test_update_tags(self, tmp_path):
         """Updates note tags."""
