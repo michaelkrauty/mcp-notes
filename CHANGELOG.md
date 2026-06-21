@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.38] - 2026-06-20
+
+### Fixed
+
+- **`get_note_links` no longer crashes on a dangling outgoing link when the in-memory UUID index is stale relative to disk.** `NoteStore.get_summary()` resolved the path from the UUID index and read it without checking the file still exists, unlike `read()`/`delete()` which rebuild the index and raise `NoteNotFoundError` when a path is in the index but the file is gone. So if a linked note's file was removed out-of-band (an external delete, or a `git pull`/`checkout`/`stash` in this git-backed markdown store) while its UUID lingered in the not-yet-reindexed index, resolving the link target raised a bare `FileNotFoundError`. The link resolver only catches `NoteNotFoundError`, so the exception propagated and the entire link view for the note failed instead of reporting the target in `broken`. `get_summary()` now applies the same stale-index guard as `read()`, so a dangling target is correctly reported as broken.
+
 ## [1.0.37] - 2026-06-20
 
 ### Fixed

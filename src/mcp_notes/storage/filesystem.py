@@ -752,6 +752,19 @@ class NoteStore:
     def get_summary(self, note_id: UUID) -> NoteSummary:
         """Get summary for a single note."""
         path = self._note_path(note_id)
+        if not path.exists():
+            # Path in index but file missing (external delete, or a git
+            # checkout/pull that moved or removed it). Rebuild the index, then
+            # re-resolve: a moved/renamed file is repointed to its new path and
+            # read normally, while a genuinely deleted one raises
+            # NoteNotFoundError (from _note_path or the re-check below). Without
+            # this guard a dangling outgoing link raises a bare FileNotFoundError
+            # that crashes the whole get_note_links view instead of being
+            # reported as broken.
+            self.uuid_index.rebuild_if_path_missing(note_id)
+            path = self._note_path(note_id)
+            if not path.exists():
+                raise NoteNotFoundError(f"Note not found: {note_id}")
         content = path.read_text(encoding="utf-8")
         parsed = parse_note(content)
         category = self._category_from_path(path)

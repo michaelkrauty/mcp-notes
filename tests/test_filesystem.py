@@ -489,6 +489,38 @@ class TestNoteStoreGetSummary:
         with pytest.raises(NoteNotFoundError):
             store.get_summary(uuid4())
 
+    def test_get_summary_stale_index_raises_notnotfound(self, tmp_path):
+        """A UUID still in the in-memory index whose file was removed
+        out-of-band raises NoteNotFoundError (not a bare FileNotFoundError),
+        mirroring read(). Otherwise a dangling outgoing link crashes the whole
+        get_note_links view instead of being reported as broken."""
+        store = NoteStore(notes_dir=tmp_path)
+        note = store.create(title="Gone", content="x")
+
+        # Remove the file directly, leaving the UUID in the index (a git
+        # pull/checkout or external delete with a lagging index).
+        store._note_path(note.id).unlink()
+
+        with pytest.raises(NoteNotFoundError):
+            store.get_summary(note.id)
+
+    def test_get_summary_moved_file_repoints_via_rebuild(self, tmp_path):
+        """A file moved out-of-band (UUID unchanged) is re-resolved via the
+        index rebuild and read normally, not falsely reported missing."""
+        store = NoteStore(notes_dir=tmp_path)
+        note = store.create(title="Moved", content="x")
+        old_path = store._note_path(note.id)
+
+        # Move the file out-of-band; the in-memory index still points at the
+        # old path until rebuild (a git checkout/pull moving a file).
+        new_dir = store.notes_dir / "moved-here"
+        new_dir.mkdir(parents=True, exist_ok=True)
+        old_path.rename(new_dir / old_path.name)
+
+        summary = store.get_summary(note.id)
+        assert summary.id == note.id
+        assert summary.title == "Moved"
+
 
 class TestNoteStoreCount:
     """Tests for counting notes."""
