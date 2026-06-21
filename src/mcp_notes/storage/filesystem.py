@@ -528,8 +528,15 @@ class NoteStore:
             else:
                 new_category = old_category
 
-            # Extract inline links from new content
+            # Extract inline links from the body. When the body content is not
+            # being replaced (content is None), also preserve any frontmatter
+            # `links` that were not authored inline -- e.g. on a hand-edited or
+            # imported note. The read side treats frontmatter links as live
+            # edges, so rebuilding from the body alone would silently drop them
+            # on an unrelated tags/title/category update.
             inline_links = extract_inline_links(new_body)
+            if content is None:
+                inline_links = list(dict.fromkeys(inline_links + parsed.links))
 
             # Update modified timestamp
             now = datetime.now(UTC)
