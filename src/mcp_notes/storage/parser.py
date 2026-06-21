@@ -3,7 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 import yaml
@@ -149,12 +149,19 @@ def parse_note(file_content: str) -> ParsedNote:  # noqa: PLR0912
     )
 
 
-def _parse_datetime(value: str | datetime | None) -> datetime:
+def _parse_datetime(value: str | datetime | date | None) -> datetime:
     """Parse datetime from various formats."""
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value
+
+    # PyYAML loads an unquoted date-only value (e.g. `created: 2024-01-15`) as a
+    # datetime.date, which is the superclass of datetime and so is not matched
+    # above. Promote it to midnight UTC, matching the date-only string formats
+    # handled below. This must come after the datetime branch.
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
 
     if isinstance(value, str):
         # Try ISO format

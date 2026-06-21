@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.35] - 2026-06-20
+
+### Fixed
+
+- **A note whose frontmatter has an unquoted date (e.g. `created: 2024-01-15`) is no longer silently excluded from every result.** PyYAML loads an unquoted date-only value as a `datetime.date` (not a `datetime` or a string), which the datetime parser did not handle, so parsing the note raised `ValueError`. Through `read_note` this surfaced as an error; through the bulk paths (`list_notes`, `search_notes`, link/backlink resolution, indexing, `list_tags`, `list_categories`) the note was swallowed as a parse error and silently dropped, making a valid note invisible and unsearchable. Unquoted date-only values (the default shape produced by Obsidian, Jekyll/Hugo, Logseq, and hand-edited notes) are now accepted and promoted to midnight UTC.
+
 ## [1.0.34] - 2026-06-20
 
 ### Fixed
