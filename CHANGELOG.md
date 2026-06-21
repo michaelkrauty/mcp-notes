@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.36] - 2026-06-20
+
+### Fixed
+
+- **`create_note`/`update_note` no longer write duplicate tags when distinct raw tags canonicalize to the same stored form.** The two write paths normalized tags with an inline comprehension that did not deduplicate and did not route through `normalize_tag`, so passing tags like `["My Tag", "my-tag"]` stored (and returned) `["my-tag", "my-tag"]`. The read/parse path deduplicates, so the create/update response disagreed with every later read of the same note, and the note's frontmatter held redundant entries. Both write paths now use `normalize_tag` with order-preserving deduplication, matching the read path.
+
 ## [1.0.35] - 2026-06-20
 
 ### Fixed

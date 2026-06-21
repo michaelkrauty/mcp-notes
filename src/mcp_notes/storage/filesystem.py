@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from mcp_notes.constants import normalize_tag
 from mcp_notes.models import Note, NoteSummary
 from mcp_notes.settings import settings
 from mcp_notes.storage.parser import (
@@ -384,9 +385,11 @@ class NoteStore:
         note_id = note_id or uuid4()
         now = datetime.now(UTC)
 
-        # Normalize tags
+        # Normalize tags through the single source of truth, deduplicating
+        # canonical collisions ("My Tag" and "my-tag" both map to "my-tag") so
+        # the stored/returned tags match a subsequent read (which also dedups).
         if tags:
-            tags = [t.lower().strip().replace(" ", "-") for t in tags if t.strip()]
+            tags = list(dict.fromkeys(n for n in (normalize_tag(t) for t in tags) if n))
 
         # Extract inline links from content
         inline_links = extract_inline_links(content)
@@ -518,7 +521,9 @@ class NoteStore:
             new_body = content if content is not None else parsed.body
 
             if tags is not None:
-                new_tags = [t.lower().strip().replace(" ", "-") for t in tags if t.strip()]
+                new_tags = list(
+                    dict.fromkeys(n for n in (normalize_tag(t) for t in tags) if n)
+                )
             else:
                 new_tags = parsed.tags
 

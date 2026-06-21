@@ -153,6 +153,20 @@ class TestNoteStoreCreate:
         assert "work-project" in note.tags
         assert "important" in note.tags
 
+    def test_create_dedups_tags_that_collapse(self, tmp_path):
+        """Distinct raw tags that canonicalize to the same stored form are
+        deduplicated on write (mirroring the read path), so the returned/stored
+        tags do not contain duplicates that disagree with a later read."""
+        store = NoteStore(notes_dir=tmp_path)
+
+        note = store.create(
+            title="Dup Tags",
+            content="Content",
+            tags=["My Tag", "my-tag", "FOO", "foo"],
+        )
+
+        assert note.tags == ["my-tag", "foo"]
+
     def test_create_with_category(self, tmp_path):
         """Creates note with category."""
         store = NoteStore(notes_dir=tmp_path)
