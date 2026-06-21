@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.31] - 2026-06-20
+
+### Fixed
+
+- **A force reindex (`reindex_notes`) no longer destroys the glossary and fact indexes.** Notes, chunks, glossary entries, and facts share a single Qdrant collection, but a forced note reindex cleared it by deleting and recreating the whole collection, wiping every glossary and fact point as collateral. The glossary has no rebuild path, so `search_glossary` returned nothing for every query after a reindex (the entries still existed in the database and `lookup_term`/`list_glossary` still worked, but semantic glossary search stayed empty until each entry was individually re-added or updated). The forced reindex now clears only the note and chunk points it owns (a scoped delete by point type), preserving the glossary and fact points, mirroring how the facts indexer already scopes its own clear.
+
 ## [1.0.30] - 2026-06-20
 
 ### Fixed
