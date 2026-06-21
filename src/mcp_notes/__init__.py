@@ -1,6 +1,6 @@
 """MCP server for semantic note management."""
 
-__version__ = "1.0.32"
+__version__ = "1.0.33"
 
 
 def main() -> None:
