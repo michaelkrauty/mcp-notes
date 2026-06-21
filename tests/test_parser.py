@@ -66,6 +66,30 @@ Full body content here."""
         assert parsed.links == [link_id]
         assert parsed.body == "Full body content here."
 
+    def test_date_formats_bare_yaml_date(self):
+        """An unquoted date-only value parses to midnight UTC, not raises.
+
+        PyYAML loads an unquoted `created: 2024-01-15` as a datetime.date (the
+        default shape produced by Obsidian, Jekyll/Hugo, Logseq, and hand-edited
+        notes); it must not make the whole note unparseable.
+        """
+        note_id = uuid4()
+        content = f"""---
+id: {note_id}
+title: Bare Date
+created: 2024-01-15
+modified: 2024-01-16
+---
+
+Body"""
+
+        parsed = parse_note(content)
+        assert parsed.created.year == 2024
+        assert parsed.created.month == 1
+        assert parsed.created.day == 15
+        assert parsed.created.tzinfo is not None
+        assert parsed.modified.day == 16
+
     def test_missing_frontmatter_raises(self):
         """Missing frontmatter raises ValueError."""
         content = "Just body content without frontmatter"
