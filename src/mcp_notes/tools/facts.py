@@ -14,6 +14,7 @@ Tools:
 - get_neighbors: Get immediate neighbors of an entity
 """
 
+import logging
 from datetime import date
 from uuid import UUID
 
@@ -28,6 +29,8 @@ from mcp_notes.facts import (
     SourceType,
 )
 from mcp_notes.singletons import get_fact_indexer, get_fact_store, get_search
+
+logger = logging.getLogger(__name__)
 
 # Input validation limits (DoS protection)
 MAX_ENTITY_NAME_LENGTH = 1000  # Maximum characters in entity name
@@ -463,6 +466,15 @@ async def delete_fact(fact_id: str) -> dict:
 
     deleted = store.delete(uuid)
     if deleted:
+        # Remove the fact's point from the semantic index too: search_facts reads
+        # straight from the index payload with no store existence check, so a
+        # stale point would keep returning the deleted fact. Best-effort -- index
+        # unavailability must not fail the delete (mirrors NoteService delete).
+        try:
+            indexer = await get_fact_indexer()
+            await indexer.delete_fact_index(uuid)
+        except Exception as e:
+            logger.warning(f"Failed to delete fact index for {uuid}: {e}")
         return {"success": True, "deleted_id": fact_id}
     else:
         return error_response(ErrorCode.FACT_NOT_FOUND, f"Fact not found: {fact_id}")

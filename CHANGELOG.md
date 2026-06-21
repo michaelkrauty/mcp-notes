@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.29] - 2026-06-20
+
+### Fixed
+
+- **`delete_fact` now removes the fact from the semantic index.** Fact search (`search_facts`) reads straight from the indexed payload with no existence check against the store, but `delete_fact` only removed the fact from the database, so a deleted fact kept being returned by `search_facts` (the orphaned point lingered until a full `index_facts(force=True)`). `delete_fact` now also deletes the fact's index point, best-effort so an unavailable index does not fail the delete (mirroring how note and glossary deletes keep their indexes in sync).
+
 ## [1.0.28] - 2026-06-20
 
 ### Fixed
