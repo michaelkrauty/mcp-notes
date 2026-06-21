@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.30] - 2026-06-20
+
+### Fixed
+
+- **`update_fact` now re-indexes the fact, so semantic fact search reflects the update.** `update_fact` changed the fact in the database but never re-indexed it, so `search_facts` (which reads straight from the indexed payload) kept returning the fact's old context, confidence, and validity until a full `index_facts(force=True)`. It now re-indexes the updated fact, best-effort so an unavailable index does not fail the update. This completes the fact index synchronization started in 1.0.29 (`delete_fact`), and relies on vector-core v1.2.11 making `index_fact` atomic so a transient re-index failure cannot drop the fact from search.
+
+### Changed
+
+- Bump vector-core to v1.2.11 (atomic `index_fact` re-indexing).
+
 ## [1.0.29] - 2026-06-20
 
 ### Fixed

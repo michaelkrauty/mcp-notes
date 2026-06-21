@@ -435,6 +435,15 @@ async def update_fact(
             valid_from=parsed_valid_from,
             valid_to=parsed_valid_to,
         )
+        # Re-index so the semantic search payload reflects the update. index_fact
+        # is atomic (it upserts the stable-id point in place, vector-core
+        # >= 1.2.11), so a transient failure leaves the previous point intact.
+        # Best-effort, as with delete_fact.
+        try:
+            indexer = await get_fact_indexer()
+            await indexer.index_fact(fact)
+        except Exception as e:
+            logger.warning(f"Failed to re-index fact {uuid}: {e}")
         return fact.to_dict()
 
     except FactNotFoundError:

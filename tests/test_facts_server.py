@@ -552,3 +552,19 @@ class TestFactIndexSync:
         assert result["success"] is True
         indexer.delete_fact_index.assert_awaited_once()
         assert str(indexer.delete_fact_index.await_args.args[0]) == created["id"]
+
+    @pytest.mark.asyncio
+    async def test_update_fact_reindexes(self, temp_fact_store, monkeypatch):
+        indexer = AsyncMock()
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        created = await add_fact(subject="A", predicate="p", object="B")
+        indexer.reset_mock()
+
+        result = await update_fact(created["id"], context="updated context")
+
+        assert "error_code" not in result
+        indexer.index_fact.assert_awaited_once()
+        assert str(indexer.index_fact.await_args.args[0].id) == created["id"]
