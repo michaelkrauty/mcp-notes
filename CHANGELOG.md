@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.37] - 2026-06-20
+
+### Fixed
+
+- **Corrected the `update_fact` documentation for clearing `context`/`valid_from`/`valid_to`.** The docstrings said "pass null to clear", but the tool cannot distinguish an omitted argument from an explicit JSON null (both arrive as `None`), and `None` is treated as "leave unchanged". The actual clear mechanism is an empty string `""`: it clears `valid_from`/`valid_to` to null and sets `context` to blank. Following the old documentation (passing null) silently left the field unchanged. The docstrings now describe the real behavior.
+
 ## [1.0.36] - 2026-06-20
 
 ### Fixed

@@ -379,10 +379,13 @@ async def update_fact(
 
     Args:
         fact_id: Fact UUID string
-        context: New context description (pass null to clear)
+        context: New context description (omit or null leaves it unchanged;
+            pass an empty string "" to set it blank)
         confidence: New confidence level 0.0-1.0
-        valid_from: New start date (ISO format, pass null to clear)
-        valid_to: New end date (ISO format, pass null to clear)
+        valid_from: New start date in ISO format (omit or null leaves it
+            unchanged; pass an empty string "" to clear it)
+        valid_to: New end date in ISO format (omit or null leaves it
+            unchanged; pass an empty string "" to clear it)
 
     Returns:
         Updated fact as dict
