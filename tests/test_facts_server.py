@@ -1,10 +1,12 @@
 """Integration tests for facts MCP tools."""
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 
+import mcp_notes.tools.facts as facts_mod
 from mcp_notes.facts import FactStore
 
 
@@ -525,3 +527,28 @@ class TestFactDateRangeValidation:
         assert "valid_from" in str(result)
         # the fact's existing value is untouched
         assert temp_fact_store.read(UUID(created["id"])).valid_from is None
+
+
+class TestFactIndexSync:
+    """delete_fact and update_fact must keep the semantic fact index in sync:
+    search_facts reads straight from the Qdrant payload with no existence check
+    against the store, so a deleted fact's stale point would keep being returned
+    and an updated fact would return a stale payload."""
+
+    @pytest.mark.asyncio
+    async def test_delete_fact_removes_point_from_index(
+        self, temp_fact_store, monkeypatch
+    ):
+        indexer = AsyncMock()
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        created = await add_fact(subject="Zorblax", predicate="rules", object="Mars")
+        indexer.reset_mock()  # ignore any indexing during add
+
+        result = await delete_fact(created["id"])
+
+        assert result["success"] is True
+        indexer.delete_fact_index.assert_awaited_once()
+        assert str(indexer.delete_fact_index.await_args.args[0]) == created["id"]
