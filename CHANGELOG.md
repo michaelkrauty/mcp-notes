@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.39] - 2026-06-25
+
+### Fixed
+
+- **`get_note_links` no longer crashes when a note on disk has unparseable frontmatter.** The outgoing-link loop caught only `NoteNotFoundError` from `get_summary()`, and the source note's read plus parse was guarded the same narrow way. But a note whose file exists (so it is in the UUID index and `exists()` returns True) can still fail to parse: a missing `---` fence, invalid YAML, non-mapping frontmatter, an oversized frontmatter block, or a missing required field all raise a bare `ValueError` (or `FrontmatterTooLargeError`, a `ValueError` subclass), not `NoteNotFoundError`. That exception propagated out of the tool and aborted the entire link view for the note. Both paths now catch the same set of storage and parse errors that `NoteStore.list_all`/`iter_all` already tolerate per file: a corrupt outgoing target is reported in `broken` and skipped, and a corrupt source note returns empty links. Known limitation: a corrupt target is still not flagged by `get_all_broken_links`, which checks only index-level existence.
+
 ## [1.0.38] - 2026-06-20
 
 ### Fixed

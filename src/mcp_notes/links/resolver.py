@@ -5,7 +5,12 @@ from uuid import UUID
 
 from mcp_notes.models import BrokenLink, NoteLinks, NoteSummary
 from mcp_notes.settings import settings
-from mcp_notes.storage.filesystem import NoteNotFoundError, NoteStore
+from mcp_notes.storage.filesystem import (
+    NoteNotFoundError,
+    NoteStore,
+    NoteTooLargeError,
+    PathTraversalError,
+)
 from mcp_notes.storage.parser import ParsedNote, extract_inline_links, parse_note
 
 logger = logging.getLogger(__name__)
@@ -72,10 +77,19 @@ class LinkResolver:
         """
         try:
             note = self.note_store.read(note_id)
-        except NoteNotFoundError:
+            parsed = parse_note(note.content)
+        except (
+            NoteNotFoundError,
+            ValueError,
+            PathTraversalError,
+            NoteTooLargeError,
+            OSError,
+        ):
+            # The source note is missing, or present-but-corrupt (unparseable
+            # frontmatter), oversized, or unreadable. It has no resolvable links,
+            # so return an empty result instead of crashing the whole links view,
+            # mirroring the per-file tolerance of NoteStore.iter_all/list_all.
             return NoteLinks()
-
-        parsed = parse_note(note.content)
 
         # Get outgoing links (from frontmatter + inline)
         outgoing_ids = set(parsed.links)
@@ -89,7 +103,18 @@ class LinkResolver:
             try:
                 summary = self.note_store.get_summary(target_id)
                 outgoing.append(summary)
-            except NoteNotFoundError:
+            except (
+                NoteNotFoundError,
+                ValueError,
+                PathTraversalError,
+                NoteTooLargeError,
+                OSError,
+            ):
+                # The target is missing, or present-but-corrupt (unparseable
+                # frontmatter), oversized, or unreadable. In every case it is not
+                # a usable link, so report it as broken rather than letting one
+                # bad note abort the entire links view.
+                logger.debug("Treating link target %s as broken", target_id)
                 broken.append(target_id)
 
         # Find incoming links (backlinks)
