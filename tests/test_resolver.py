@@ -4,9 +4,11 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from mcp_notes.links.resolver import LinkResolver
-from mcp_notes.models import BrokenLink, Note, NoteSummary
-from mcp_notes.storage.filesystem import NoteNotFoundError
+from mcp_notes.models import BrokenLink, Note, NoteLinks, NoteSummary
+from mcp_notes.storage.filesystem import NoteNotFoundError, NoteStore
 from mcp_notes.storage.parser import ParsedNote
 
 
@@ -626,3 +628,88 @@ class TestBacklinksExceptionHandling:
         ids = {s.id for s in result.incoming}
         assert source1_id in ids
         assert source2_id in ids
+
+
+def _corrupt_missing_fence(note_id):
+    """No YAML frontmatter fence at all."""
+    return "This file has no YAML frontmatter fence at all.\n"
+
+
+def _corrupt_invalid_yaml(note_id):
+    """Has a fence but the YAML inside is malformed."""
+    return "---\nkey: value: nested\n---\n\nbody\n"
+
+
+def _corrupt_non_mapping(note_id):
+    """Frontmatter parses to a YAML list, not a mapping."""
+    return "---\n- a\n- b\n- c\n---\n\nbody\n"
+
+
+def _corrupt_missing_field(note_id):
+    """Valid YAML mapping but missing the required `modified` field."""
+    return (
+        "---\n"
+        f"id: {note_id}\n"
+        "title: Corrupt\n"
+        "created: 2024-01-01T00:00:00Z\n"
+        "---\n\nbody\n"
+    )
+
+
+# Each corruption exercises a distinct parse_note failure mode, all of which
+# surface as a bare ValueError (FrontmatterTooLargeError is a ValueError too).
+CORRUPTIONS = [
+    pytest.param(_corrupt_missing_fence, id="missing-fence"),
+    pytest.param(_corrupt_invalid_yaml, id="invalid-yaml"),
+    pytest.param(_corrupt_non_mapping, id="non-mapping-frontmatter"),
+    pytest.param(_corrupt_missing_field, id="missing-required-field"),
+]
+
+
+class TestGetNoteLinksCorruptFrontmatter:
+    """get_note_links must not crash when a note on disk is unparseable.
+
+    A note whose file exists (so it is in the UUID index and exists() is True)
+    but whose frontmatter cannot be parsed must not abort the whole links view.
+    A corrupt outgoing target is reported as broken; a corrupt source note
+    yields an empty NoteLinks, mirroring the NoteNotFoundError behavior.
+    """
+
+    @pytest.mark.parametrize("corrupt", CORRUPTIONS)
+    def test_corrupt_outgoing_target_reported_broken(self, tmp_path, corrupt):
+        """A linked target with unparseable frontmatter lands in .broken."""
+        store = NoteStore(notes_dir=tmp_path)
+        store.ensure_directories()
+        target = store.create(title="Target", content="target body")
+        source = store.create(title="Source", content=f"links to [[{target.id}]]")
+
+        # Corrupt the target's file in place, keeping the filename so the UUID
+        # index still resolves it (exists() stays True).
+        target_path = store.get_note_path(target.id)
+        target_path.write_text(corrupt(target.id), encoding="utf-8")
+
+        assert store.exists(target.id) is True
+
+        resolver = LinkResolver(note_store=store)
+        result = resolver.get_note_links(source.id)
+
+        assert target.id in result.broken
+        assert all(s.id != target.id for s in result.outgoing)
+
+    @pytest.mark.parametrize("corrupt", CORRUPTIONS)
+    def test_corrupt_source_returns_empty(self, tmp_path, corrupt):
+        """A source note that is itself unparseable yields an empty NoteLinks."""
+        store = NoteStore(notes_dir=tmp_path)
+        store.ensure_directories()
+        source = store.create(title="Source", content="some body")
+
+        source_path = store.get_note_path(source.id)
+        source_path.write_text(corrupt(source.id), encoding="utf-8")
+
+        resolver = LinkResolver(note_store=store)
+        result = resolver.get_note_links(source.id)
+
+        assert result == NoteLinks()
+        assert result.outgoing == []
+        assert result.incoming == []
+        assert result.broken == []
