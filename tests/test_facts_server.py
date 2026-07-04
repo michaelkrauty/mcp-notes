@@ -218,6 +218,58 @@ class TestAddFactsBatch:
         assert len(result["errors"]) == 1
         assert result["errors"][0]["index"] == 1
 
+    @pytest.mark.asyncio
+    async def test_add_batch_non_string_date_reports_error_not_crash(
+        self, temp_fact_store
+    ):
+        """A non-string valid_from/valid_to (e.g. a JSON integer) must be
+        reported in errors[] and the item skipped, not raise an uncaught
+        TypeError from date.fromisoformat that aborts the batch after earlier
+        facts were already committed."""
+        result = await add_facts_batch(
+            [
+                {"subject": "Alice", "predicate": "knows", "object": "Bob"},
+                {
+                    "subject": "C",
+                    "predicate": "p",
+                    "object": "D",
+                    "valid_from": 2020,  # int, not an ISO date string
+                },
+                {
+                    "subject": "E",
+                    "predicate": "p",
+                    "object": "F",
+                    "valid_to": True,  # bool, not an ISO date string
+                },
+                {"subject": "Dave", "predicate": "knows", "object": "Eve"},
+            ]
+        )
+
+        assert result["added"] == 2  # Alice/Bob and Dave/Eve still added
+        assert len(result["errors"]) == 2
+        assert {e["index"] for e in result["errors"]} == {1, 2}
+        assert "valid_from" in result["errors"][0]["error"]
+        assert "valid_to" in result["errors"][1]["error"]
+
+    @pytest.mark.asyncio
+    async def test_add_batch_falsy_non_string_date_rejected(self, temp_fact_store):
+        """A falsy non-string date (JSON 0 or false) must be reported as an
+        error, not treated as absent and the date silently dropped. An empty or
+        omitted date is still accepted as "no date"."""
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "p", "object": "B", "valid_from": 0},
+                {"subject": "C", "predicate": "p", "object": "D", "valid_to": False},
+                {"subject": "E", "predicate": "p", "object": "F", "valid_from": ""},
+                {"subject": "G", "predicate": "p", "object": "H"},
+            ]
+        )
+
+        # E/F (empty string date) and G/H (no date) are accepted; 0 and False
+        # are rejected.
+        assert result["added"] == 2
+        assert {e["index"] for e in result["errors"]} == {0, 1}
+
 
 class TestUpdateFact:
     """Tests for update_fact tool."""

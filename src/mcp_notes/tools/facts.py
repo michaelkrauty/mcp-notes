@@ -93,6 +93,38 @@ def _validate_date_range(valid_from: date | None, valid_to: date | None) -> str 
     return None
 
 
+def _parse_optional_iso_date(
+    value: object, field: str
+) -> tuple[date | None, str | None]:
+    """Parse an optional ISO date (YYYY-MM-DD) from a tool argument.
+
+    Returns ``(parsed_date, None)`` on success, ``(None, None)`` when the field
+    is omitted or an empty string (it is optional), and ``(None, error_message)``
+    otherwise.
+
+    Only ``None`` (an omitted key) and an empty/whitespace string count as
+    absent. A present non-string value such as a JSON ``0`` or ``false`` is
+    rejected, not silently dropped: batch facts arrive as ``list[dict]`` whose
+    values are not type-coerced by the tool schema, so without this the value
+    would either be passed to ``date.fromisoformat`` (which raises an uncaught
+    ``TypeError`` on a non-string, aborting the whole batch after earlier facts
+    were committed) or, for a falsy non-string, be treated as absent and the
+    date silently lost. add_fact's own params are typed ``str | None`` and never
+    hit the non-string path, but share this helper so date parsing lives in one
+    place.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, f"Invalid {field} date format: {value!r}. Use YYYY-MM-DD"
+    if not value.strip():
+        return None, None
+    try:
+        return date.fromisoformat(value), None
+    except ValueError:
+        return None, f"Invalid {field} date format: {value}. Use YYYY-MM-DD"
+
+
 @mcp.tool()
 async def add_fact(
     subject: str,
@@ -132,8 +164,6 @@ async def add_fact(
     Returns:
         Created fact as dict
     """
-    from datetime import date as date_type
-
     # Validate entity names and types
     for field, value in [
         ("subject", subject),
@@ -153,24 +183,12 @@ async def add_fact(
     store = get_fact_store()
 
     # Parse dates
-    parsed_valid_from = None
-    parsed_valid_to = None
-    if valid_from:
-        try:
-            parsed_valid_from = date_type.fromisoformat(valid_from)
-        except ValueError:
-            return error_response(
-                ErrorCode.INVALID_INPUT,
-                f"Invalid valid_from date format: {valid_from}. Use YYYY-MM-DD",
-            )
-    if valid_to:
-        try:
-            parsed_valid_to = date_type.fromisoformat(valid_to)
-        except ValueError:
-            return error_response(
-                ErrorCode.INVALID_INPUT,
-                f"Invalid valid_to date format: {valid_to}. Use YYYY-MM-DD",
-            )
+    parsed_valid_from, date_error = _parse_optional_iso_date(valid_from, "valid_from")
+    if date_error:
+        return error_response(ErrorCode.INVALID_INPUT, date_error)
+    parsed_valid_to, date_error = _parse_optional_iso_date(valid_to, "valid_to")
+    if date_error:
+        return error_response(ErrorCode.INVALID_INPUT, date_error)
 
     range_error = _validate_date_range(parsed_valid_from, parsed_valid_to)
     if range_error:
@@ -243,8 +261,6 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
     Returns:
         Summary dict with added count, duplicates count, and any errors
     """
-    from datetime import date as date_type
-
     store = get_fact_store()
 
     added = 0
@@ -286,21 +302,21 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
             errors.append({"index": i, "error": confidence_error})
             continue
 
-        # Parse dates
-        parsed_valid_from = None
-        parsed_valid_to = None
-        if fact_data.get("valid_from"):
-            try:
-                parsed_valid_from = date_type.fromisoformat(fact_data["valid_from"])
-            except ValueError:
-                errors.append({"index": i, "error": "Invalid valid_from date"})
-                continue
-        if fact_data.get("valid_to"):
-            try:
-                parsed_valid_to = date_type.fromisoformat(fact_data["valid_to"])
-            except ValueError:
-                errors.append({"index": i, "error": "Invalid valid_to date"})
-                continue
+        # Parse dates. Batch dict values are not type-coerced by the tool
+        # schema, so a non-string valid_from/valid_to must be rejected as a
+        # per-item error rather than crashing the whole batch on a TypeError.
+        parsed_valid_from, date_error = _parse_optional_iso_date(
+            fact_data.get("valid_from"), "valid_from"
+        )
+        if date_error:
+            errors.append({"index": i, "error": date_error})
+            continue
+        parsed_valid_to, date_error = _parse_optional_iso_date(
+            fact_data.get("valid_to"), "valid_to"
+        )
+        if date_error:
+            errors.append({"index": i, "error": date_error})
+            continue
 
         range_error = _validate_date_range(parsed_valid_from, parsed_valid_to)
         if range_error:
