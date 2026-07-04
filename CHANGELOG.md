@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.40] - 2026-07-04
+
+### Fixed
+
+- **`add_facts_batch` no longer crashes the whole batch on a non-string date.** Batch facts arrive as `list[dict]` whose values are not type-coerced by the tool schema, so a `valid_from` or `valid_to` that is not a string (for example a JSON integer `2020`) made `date.fromisoformat` raise `TypeError`, which was not caught (only `ValueError` was), aborting the entire batch after earlier valid facts had already been committed. This is the same partial-commit-abort class that was fixed for a non-string subject, predicate, or object in v1.0.33; the date fields were missed. Date parsing now runs through a shared `_parse_optional_iso_date` helper that reports a non-string date as a per-item error and continues with the rest of the batch. `add_fact` and `update_fact` declare typed `str | None` parameters and never hit the non-string path; `add_fact` now shares the same helper so date parsing lives in one place.
+
 ## [1.0.39] - 2026-06-25
 
 ### Fixed
