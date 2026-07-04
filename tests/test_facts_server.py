@@ -251,6 +251,25 @@ class TestAddFactsBatch:
         assert "valid_from" in result["errors"][0]["error"]
         assert "valid_to" in result["errors"][1]["error"]
 
+    @pytest.mark.asyncio
+    async def test_add_batch_falsy_non_string_date_rejected(self, temp_fact_store):
+        """A falsy non-string date (JSON 0 or false) must be reported as an
+        error, not treated as absent and the date silently dropped. An empty or
+        omitted date is still accepted as "no date"."""
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "p", "object": "B", "valid_from": 0},
+                {"subject": "C", "predicate": "p", "object": "D", "valid_to": False},
+                {"subject": "E", "predicate": "p", "object": "F", "valid_from": ""},
+                {"subject": "G", "predicate": "p", "object": "H"},
+            ]
+        )
+
+        # E/F (empty string date) and G/H (no date) are accepted; 0 and False
+        # are rejected.
+        assert result["added"] == 2
+        assert {e["index"] for e in result["errors"]} == {0, 1}
+
 
 class TestUpdateFact:
     """Tests for update_fact tool."""

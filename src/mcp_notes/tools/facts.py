@@ -98,21 +98,27 @@ def _parse_optional_iso_date(
 ) -> tuple[date | None, str | None]:
     """Parse an optional ISO date (YYYY-MM-DD) from a tool argument.
 
-    Returns ``(parsed_date, None)`` on success, ``(None, None)`` when the value
-    is absent (the field is optional), and ``(None, error_message)`` otherwise.
+    Returns ``(parsed_date, None)`` on success, ``(None, None)`` when the field
+    is omitted or an empty string (it is optional), and ``(None, error_message)``
+    otherwise.
 
-    A non-string value is rejected with a clear error rather than being passed
-    to ``date.fromisoformat``. Batch facts arrive as ``list[dict]`` whose values
-    are not type-coerced by the tool schema, so a JSON integer or boolean would
-    otherwise raise an uncaught ``TypeError`` (``fromisoformat`` only accepts
-    ``str``) and abort the whole batch after earlier facts had already been
-    committed. add_fact's own params are typed ``str | None`` and never hit the
-    non-string path, but share this helper so date parsing lives in one place.
+    Only ``None`` (an omitted key) and an empty/whitespace string count as
+    absent. A present non-string value such as a JSON ``0`` or ``false`` is
+    rejected, not silently dropped: batch facts arrive as ``list[dict]`` whose
+    values are not type-coerced by the tool schema, so without this the value
+    would either be passed to ``date.fromisoformat`` (which raises an uncaught
+    ``TypeError`` on a non-string, aborting the whole batch after earlier facts
+    were committed) or, for a falsy non-string, be treated as absent and the
+    date silently lost. add_fact's own params are typed ``str | None`` and never
+    hit the non-string path, but share this helper so date parsing lives in one
+    place.
     """
-    if not value:
+    if value is None:
         return None, None
     if not isinstance(value, str):
         return None, f"Invalid {field} date format: {value!r}. Use YYYY-MM-DD"
+    if not value.strip():
+        return None, None
     try:
         return date.fromisoformat(value), None
     except ValueError:
