@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.41] - 2026-07-10
+
+### Fixed
+
+- **New facts are now immediately available to semantic fact search.** `add_fact` committed facts to SQLite without adding them to the semantic index, and `add_facts_batch` had the same omission, so newly created facts stayed invisible to `search_facts` until a manual `index_facts` run. Single creates now call `index_fact`, while batch creates use one incremental `index_all(force=False)` pass instead of invoking the indexer once per fact. Index maintenance remains best-effort after the database commit: an indexing failure is logged but does not lose the fact, change the successful create response, or abort the batch. The batch tool documentation now also reflects that each newly created fact is committed independently rather than claiming one enclosing transaction.
+
 ## [1.0.40] - 2026-07-04
 
 ### Fixed

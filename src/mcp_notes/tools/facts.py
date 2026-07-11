@@ -235,6 +235,12 @@ async def add_fact(
             valid_to=parsed_valid_to,
             source=source,
         )
+        # Best-effort because the fact is already committed to the store.
+        try:
+            indexer = await get_fact_indexer()
+            await indexer.index_fact(fact)
+        except Exception as e:
+            logger.warning(f"Failed to index fact {fact.id}: {e}")
         return fact.to_dict()
 
     except DuplicateFactError as e:
@@ -248,9 +254,9 @@ async def add_fact(
 # Inherently a long per-item validator (already over the branch limit); the
 # added confidence check tips it past the statement limit too. noqa the new
 # code rather than carve up well-tested batch logic for a small fix.
-async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
+async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
     """
-    Batch import multiple facts in a single transaction.
+    Add multiple facts, committing each newly created fact independently.
 
     Args:
         facts: List of fact dicts, each with same fields as add_fact:
@@ -371,6 +377,15 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0915
 
         except DuplicateFactError:
             duplicates += 1
+
+    if added:
+        # One incremental pass avoids invoking the indexer separately for every
+        # created fact.
+        try:
+            indexer = await get_fact_indexer()
+            await indexer.index_all(force=False)
+        except Exception as e:
+            logger.warning(f"Failed to index {added} added facts: {e}")
 
     return {
         "added": added,
