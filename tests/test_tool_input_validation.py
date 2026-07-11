@@ -12,6 +12,7 @@ import pytest
 from vector_core.errors import ErrorCode, is_error_response
 
 import mcp_notes.singletons as singletons_module
+import mcp_notes.tools.facts as facts_mod
 from mcp_notes.facts import FactStore
 from mcp_notes.server import (
     add_fact,
@@ -24,11 +25,14 @@ from mcp_notes.server import (
 
 
 @pytest.fixture
-def temp_fact_store(tmp_path):
+def temp_fact_store(tmp_path, monkeypatch):
     """Inject a temporary SQLite-backed FactStore (no Qdrant/embeddings needed)."""
     original = singletons_module._fact_store.get_if_initialized()
     store = FactStore(db_path=tmp_path / "test_facts.db")
     singletons_module._fact_store.set_instance(store)
+    monkeypatch.setattr(
+        facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock())
+    )
     yield store
     store.close()
     singletons_module._fact_store.set_instance(original)

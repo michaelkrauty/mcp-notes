@@ -36,6 +36,9 @@ def temp_fact_store(tmp_path, monkeypatch):
     db_path = tmp_path / "test_facts.db"
     temp_store = FactStore(db_path=db_path)
     singletons_module._fact_store.set_instance(temp_store)
+    monkeypatch.setattr(
+        facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock())
+    )
 
     yield temp_store
 
@@ -601,10 +604,84 @@ class TestFactDateRangeValidation:
 
 
 class TestFactIndexSync:
-    """delete_fact and update_fact must keep the semantic fact index in sync:
+    """Fact mutations must keep the semantic fact index in sync:
     search_facts reads straight from the Qdrant payload with no existence check
     against the store, so a deleted fact's stale point would keep being returned
-    and an updated fact would return a stale payload."""
+    and created or updated facts would be missing or stale."""
+
+    @pytest.mark.asyncio
+    async def test_add_fact_indexes_created_fact(
+        self, temp_fact_store, monkeypatch
+    ):
+        indexer = AsyncMock()
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        created = await add_fact(subject="A", predicate="p", object="B")
+
+        indexer.index_fact.assert_awaited_once()
+        assert str(indexer.index_fact.await_args.args[0].id) == created["id"]
+
+    @pytest.mark.asyncio
+    async def test_add_facts_batch_indexes_in_one_incremental_pass(
+        self, temp_fact_store, monkeypatch
+    ):
+        indexer = AsyncMock()
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        result = await add_facts_batch([
+            {"subject": "A", "predicate": "p", "object": "B"},
+            {"subject": "C", "predicate": "p", "object": "D"},
+        ])
+
+        assert result["added"] == 2
+        indexer.index_all.assert_awaited_once_with(force=False)
+        indexer.index_fact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_add_fact_index_failure_keeps_created_fact(
+        self, temp_fact_store, monkeypatch, caplog
+    ):
+        indexer = AsyncMock()
+        indexer.index_fact.side_effect = RuntimeError("index unavailable")
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        with caplog.at_level("WARNING", logger=facts_mod.__name__):
+            created = await add_fact(subject="A", predicate="p", object="B")
+
+        assert "error_code" not in created
+        assert temp_fact_store.read(UUID(created["id"])).subject == "A"
+        assert "Failed to index fact" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_add_facts_batch_index_failure_keeps_created_facts(
+        self, temp_fact_store, monkeypatch, caplog
+    ):
+        indexer = AsyncMock()
+        indexer.index_all.side_effect = RuntimeError("index unavailable")
+        monkeypatch.setattr(
+            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
+        )
+
+        with caplog.at_level("WARNING", logger=facts_mod.__name__):
+            result = await add_facts_batch([
+                {"subject": "A", "predicate": "p", "object": "B"},
+                {"subject": "C", "predicate": "p", "object": "D"},
+            ])
+
+        assert result == {
+            "added": 2,
+            "duplicates": 0,
+            "errors": [],
+            "total_processed": 2,
+        }
+        assert temp_fact_store.count() == 2
+        assert "Failed to index 2 added facts" in caplog.text
 
     @pytest.mark.asyncio
     async def test_delete_fact_removes_point_from_index(
