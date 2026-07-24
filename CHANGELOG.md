@@ -4,8 +4,17 @@
 
 ### Fixed
 
-- **The per-note lock now actually excludes concurrent writers.** `_file_lock` unlinked its lock file on release, but `flock` is associated with the inode rather than the pathname. A waiter that had already opened the file kept its lock on the now unreachable inode, while the next arrival created a fresh inode and took an uncontended lock on that, so two callers ran the same note's read-modify-write at once. Under an eight-way contention test this was not a rare interleaving: mutual exclusion was violated on the majority of acquisitions, with up to three holders inside the critical section at once. `update_note` and `delete_note` both perform a read-modify-write of the note file plus UUID index and Git state under this lock, so the exposure was lost updates and an inconsistent index. The lock file is now created once and left in place; it is empty, and there is one per note.
+- **The per-note lock now actually excludes concurrent writers.** `_file_lock` unlinked its lock file on release, but `flock` is associated with the inode rather than the pathname. A waiter that had already opened the file kept its lock on the now unreachable inode, while the next arrival created a fresh inode and took an uncontended lock on that, so two callers ran the same note's read-modify-write at once. Under an eight-way contention test this was not a rare interleaving: mutual exclusion was violated on the majority of acquisitions, with up to three holders inside the critical section at once. `NoteStore.update` and `NoteStore.delete` rewrite the note file and the UUID index under this lock, so the exposure was lost updates and an index disagreeing with what is on disk. The lock file is now created once and left in place; it is empty, and one accumulates per note UUID ever locked.
 - **Startup no longer deletes lock files it judges stale.** Lock files older than an hour were removed on `ensure_directories()`, which is the same defect from the other direction: deleting a file another process is holding leaves that process with an orphaned inode while the next arrival locks a new one. Age carries no information here, because the kernel releases a `flock` as soon as the holder's descriptor closes, including when the process dies, so an old lock file is simply an unheld one.
+- **A notes directory that was already a git repository now excludes the lock directory too.** The `.gitignore` covering `.locks/` is only written when this package initialises the repository itself, so an adopted repository never got it. Now that lock files persist, that left them as permanent untracked entries which `git add -A` could commit, and a later checkout or sync replacing a held lock's inode would recreate the very failure persistent lock files prevent. The rule is appended to `.git/info/exclude`, which is per-checkout and leaves any `.gitignore` the user maintains untouched.
+
+### Upgrade note
+
+Restart every running server process. Keeping the existing lock file name means an upgraded process and one still running the old code contend on the same path, rather than on two different ones, but a process running the old code still unlinks that file out from under the new one. Only leaving the mixed-version window closes the gap.
+
+### Known limitation
+
+The lock covers the note file and the UUID index, not the Git commit, which `NoteService` performs after `NoteStore` has released it. Two concurrent service-level operations on one note can therefore still interleave around their commits.
 
 ## [1.0.42] - 2026-07-10
 

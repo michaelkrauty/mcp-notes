@@ -16,8 +16,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from git import Repo
 
 from mcp_notes.storage.filesystem import NoteStore, _file_lock
+from mcp_notes.storage.git import LOCKS_EXCLUDE, GitManager
 
 
 @pytest.fixture
@@ -69,30 +71,43 @@ class TestMutualExclusion:
         the lock file unlinked on release this reliably reported several
         simultaneous holders.
         """
+        workers = 8
+        rounds = 60
         holders = 0
         peak = 0
         violations = 0
+        completed = 0
+        errors: list[BaseException] = []
         bookkeeping = threading.Lock()
 
         def worker() -> None:
-            nonlocal holders, peak, violations
-            for _ in range(60):
-                with _file_lock(lock_target, timeout=30.0):
-                    with bookkeeping:
-                        holders += 1
-                        peak = max(peak, holders)
-                        if holders > 1:
-                            violations += 1
-                    time.sleep(0.001)
-                    with bookkeeping:
-                        holders -= 1
+            nonlocal holders, peak, violations, completed
+            try:
+                for _ in range(rounds):
+                    with _file_lock(lock_target, timeout=30.0):
+                        with bookkeeping:
+                            holders += 1
+                            peak = max(peak, holders)
+                            if holders > 1:
+                                violations += 1
+                        time.sleep(0.001)
+                        with bookkeeping:
+                            holders -= 1
+                            completed += 1
+            except BaseException as exc:  # pragma: no cover - reported below
+                with bookkeeping:
+                    errors.append(exc)
 
-        threads = [threading.Thread(target=worker) for _ in range(8)]
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
 
+        # A worker that died early would otherwise leave peak == 1 and look
+        # like a pass, so the acquisition count has to be checked too.
+        assert not errors, errors
+        assert completed == workers * rounds
         assert violations == 0
         assert peak == 1
 
@@ -160,7 +175,9 @@ class TestStartupDoesNotRemoveLocks:
         store = NoteStore(notes_dir=tmp_path)
         store.ensure_directories()
 
-        stale = store._get_note_lock_path(uuid4())
+        # The file that is actually locked, not the path handed to _file_lock,
+        # so a future sweep aimed at real lock files cannot regress past this.
+        stale = _lock_file_for(store._get_note_lock_path(uuid4()))
         stale.touch()
         ancient = time.time() - 7 * 24 * 3600
         os.utime(stale, (ancient, ancient))
@@ -168,3 +185,38 @@ class TestStartupDoesNotRemoveLocks:
         store.ensure_directories()
 
         assert stale.exists()
+
+
+class TestLockDirectoryStaysOutOfGit:
+    """Lock files persist now, so a repository that this package did not
+    create must still exclude them: untracked clutter is the mild outcome, a
+    checkout or sync replacing a held lock's inode is the serious one."""
+
+    def test_adopted_repository_gets_an_exclude(self, tmp_path: Path) -> None:
+        Repo.init(tmp_path)
+        manager = GitManager(notes_dir=tmp_path)
+
+        assert manager.repo is not None
+        exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        assert LOCKS_EXCLUDE in exclude.splitlines()
+
+    def test_exclude_is_written_once(self, tmp_path: Path) -> None:
+        Repo.init(tmp_path)
+        for _ in range(3):
+            manager = GitManager(notes_dir=tmp_path)
+            assert manager.repo is not None
+
+        exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        assert exclude.splitlines().count(LOCKS_EXCLUDE) == 1
+
+    def test_existing_exclude_rules_are_kept(self, tmp_path: Path) -> None:
+        Repo.init(tmp_path)
+        exclude_path = tmp_path / ".git" / "info" / "exclude"
+        exclude_path.write_text("scratch/\n", encoding="utf-8")
+
+        manager = GitManager(notes_dir=tmp_path)
+        assert manager.repo is not None
+
+        lines = exclude_path.read_text(encoding="utf-8").splitlines()
+        assert "scratch/" in lines
+        assert LOCKS_EXCLUDE in lines

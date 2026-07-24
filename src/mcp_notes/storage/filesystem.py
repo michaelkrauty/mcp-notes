@@ -71,8 +71,13 @@ def _file_lock(path: Path, timeout: float = 10.0):
     lock on the now unreachable inode, while the next arrival creates a fresh
     inode and takes an uncontended lock on that. Two holders, one note, and the
     read-modify-write this lock exists to serialise runs concurrently. Lock
-    files are empty and there is one per note, so leaving them costs nothing
-    worth that risk.
+    files are empty, and one accumulates per note UUID ever locked, including
+    notes since deleted, so leaving them costs nothing worth that risk.
+
+    An upgrade from a release that still unlinked is not made safe by keeping
+    the same pathname; it only avoids guaranteeing separation. A process
+    running the old code still unlinks the file out from under a new one.
+    Restart every server process to leave the mixed-version window.
 
     Args:
         path: Path to file to lock
@@ -240,8 +245,10 @@ class NoteStore:
     # including when the process dies, so an old lock file is simply an unheld
     # one. Age says nothing about whether it is in use, and deleting a file
     # another process is holding breaks mutual exclusion for that note, because
-    # the next arrival then locks a brand new inode. The files are empty and
-    # bounded by the number of notes.
+    # the next arrival then locks a brand new inode. The files are empty, and
+    # one accumulates per note UUID ever locked, so the directory grows with
+    # notes created over time rather than with notes currently present. It is
+    # runtime state: excluded from git, and not worth backing up.
 
     def _note_path(self, note_id: UUID) -> Path:
         """
