@@ -17,6 +17,23 @@ from mcp_notes.storage.slugify import extract_uuid_from_filename
 
 logger = logging.getLogger(__name__)
 
+# Lock directory, relative to the notes root. Named here because both the
+# .gitignore written for a new repository and the per-checkout exclude added to
+# an adopted one must agree on it.
+LOCKS_EXCLUDE = ".locks/"
+
+
+def _exclude_patterns(content: bytes) -> list[bytes]:
+    """Split an exclude file into patterns the way git does.
+
+    Git ends a pattern at a newline and strips at most one carriage return
+    immediately before it. A lone carriage return is an ordinary character, so
+    ``bytes.splitlines()`` is wrong here: it would treat one as a separator and
+    find a rule git does not see.
+    """
+    return [line[:-1] if line.endswith(b"\r") else line for line in content.split(b"\n")]
+
+
 class GitManager:
     """
     Git-based versioning for notes.
@@ -49,11 +66,64 @@ class GitManager:
 
         try:
             self._repo = Repo(self.base_dir)
+            self._ensure_locks_excluded(self._repo)
         except InvalidGitRepositoryError:
             # Initialize new repo
             self._repo = self._init_repo()
 
         return self._repo
+
+    def _ensure_locks_excluded(self, repo: Repo) -> None:
+        """Keep the lock directory out of git for a repository we did not create.
+
+        The `.gitignore` written by `_init_repo` covers repositories this class
+        created, but a notes directory that was already a git repository never
+        gets it. Per-note lock files are persistent runtime state, so without an
+        exclusion they show up as untracked clutter and `git add -A` can commit
+        them. Worse, a later checkout or a sync tool could then replace the
+        inode of a lock somebody is holding, which is the failure the lock files
+        are persistent to avoid in the first place.
+
+        Writes to git's `info/exclude` rather than `.gitignore`: it is not
+        itself version-controlled and never touches a file the user maintains.
+        The path comes from `common_dir`, not `git_dir`, because git reads
+        `info/exclude` from the common directory; a linked worktree's own
+        `.git/worktrees/<name>/info/exclude` is not consulted, so the rule
+        would have no effect there. That also means the rule is shared with
+        every worktree of the repository.
+
+        Idempotent, and best-effort: a bare repository has no working tree to
+        exclude anything from, and failing to write the rule is not a reason to
+        refuse to store notes. Read and written as bytes, since an adopted
+        repository's exclude file need not be valid UTF-8 and mangling it would
+        be worse than skipping the rule.
+        """
+        if repo.bare:
+            return
+        rule = LOCKS_EXCLUDE.encode()
+        try:
+            exclude_path = Path(repo.common_dir) / "info" / "exclude"
+            prefix = b""
+            if exclude_path.exists():
+                existing = exclude_path.read_bytes()
+                # Compared verbatim: leading whitespace is significant to git,
+                # so " .locks/" is a different rule and must not satisfy this.
+                # Split the way git does rather than with splitlines(), which
+                # also breaks on a lone carriage return; git ends a pattern at a
+                # newline and strips at most one carriage return before it, so
+                # "scratch/\r.locks/" is one ineffective pattern to git and must
+                # not read as an existing rule here.
+                if rule in _exclude_patterns(existing):
+                    return
+                if existing and not existing.endswith(b"\n"):
+                    prefix = b"\n"
+            else:
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            with exclude_path.open("ab") as f:
+                f.write(prefix + rule + b"\n")
+            logger.debug(f"Excluded {LOCKS_EXCLUDE} in {exclude_path}")
+        except OSError as e:
+            logger.warning(f"Could not exclude {LOCKS_EXCLUDE} from git: {e}")
 
     def _init_repo(self) -> Repo:
         """Initialize a new git repository."""

@@ -65,6 +65,20 @@ def _file_lock(path: Path, timeout: float = 10.0):
     Uses POSIX flock() which is released automatically when the process exits
     or the file descriptor is closed.
 
+    The lock file is created once and then left in place. ``flock`` is
+    associated with the inode, not with the pathname, so unlinking the file
+    does not release anybody's lock: a waiter that already opened it keeps its
+    lock on the now unreachable inode, while the next arrival creates a fresh
+    inode and takes an uncontended lock on that. Two holders, one note, and the
+    read-modify-write this lock exists to serialise runs concurrently. Lock
+    files are empty, and one accumulates per note UUID ever locked, including
+    notes since deleted, so leaving them costs nothing worth that risk.
+
+    An upgrade from a release that still unlinked is not made safe by keeping
+    the same pathname; it only avoids guaranteeing separation. A process
+    running the old code still unlinks the file out from under a new one.
+    Restart every server process to leave the mixed-version window.
+
     Args:
         path: Path to file to lock
         timeout: Max seconds to wait for lock (raises TimeoutError if exceeded)
@@ -96,11 +110,6 @@ def _file_lock(path: Path, timeout: float = 10.0):
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
-        # Clean up lock file (best effort)
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 class NoteNotFoundError(Exception):
@@ -219,8 +228,6 @@ class NoteStore:
         self._locks_dir.mkdir(exist_ok=True)
         # Ensure UUID index is loaded/rebuilt
         self.uuid_index.ensure_loaded()
-        # Clean up stale lock files on startup (lazy cleanup)
-        self._cleanup_stale_note_locks()
 
     def _get_note_lock_path(self, note_id: UUID) -> Path:
         """
@@ -233,28 +240,15 @@ class NoteStore:
         self._locks_dir.mkdir(exist_ok=True)
         return self._locks_dir / f"{note_id}.lock"
 
-    def _cleanup_stale_note_locks(self) -> None:
-        """
-        Clean up stale lock files on startup.
-
-        Lock files older than 1 hour are considered abandoned (from crashed processes).
-        """
-        import time
-
-        if not self._locks_dir.exists():
-            return
-
-        stale_threshold = 3600  # 1 hour
-        now = time.time()
-
-        for lock_file in self._locks_dir.glob("*.lock"):
-            try:
-                mtime = lock_file.stat().st_mtime
-                if now - mtime > stale_threshold:
-                    lock_file.unlink()
-                    logger.debug(f"Cleaned up stale lock file: {lock_file}")
-            except OSError:
-                pass  # Ignore errors during cleanup
+    # Lock files are deliberately never deleted. There is no such thing as a
+    # stale flock: the kernel drops a lock when the holder's descriptor closes,
+    # including when the process dies, so an old lock file is simply an unheld
+    # one. Age says nothing about whether it is in use, and deleting a file
+    # another process is holding breaks mutual exclusion for that note, because
+    # the next arrival then locks a brand new inode. The files are empty, and
+    # one accumulates per note UUID ever locked, so the directory grows with
+    # notes created over time rather than with notes currently present. It is
+    # runtime state: excluded from git, and not worth backing up.
 
     def _note_path(self, note_id: UUID) -> Path:
         """
