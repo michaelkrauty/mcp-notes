@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.43] - 2026-07-24
+
+### Fixed
+
+- **The per-note lock now actually excludes concurrent writers.** `_file_lock` unlinked its lock file on release, but `flock` is associated with the inode rather than the pathname. A waiter that had already opened the file kept its lock on the now unreachable inode, while the next arrival created a fresh inode and took an uncontended lock on that, so two callers ran the same note's read-modify-write at once. Under an eight-way contention test this was not a rare interleaving: mutual exclusion was violated on the majority of acquisitions, with up to three holders inside the critical section at once. `update_note` and `delete_note` both perform a read-modify-write of the note file plus UUID index and Git state under this lock, so the exposure was lost updates and an inconsistent index. The lock file is now created once and left in place; it is empty, and there is one per note.
+- **Startup no longer deletes lock files it judges stale.** Lock files older than an hour were removed on `ensure_directories()`, which is the same defect from the other direction: deleting a file another process is holding leaves that process with an orphaned inode while the next arrival locks a new one. Age carries no information here, because the kernel releases a `flock` as soon as the holder's descriptor closes, including when the process dies, so an old lock file is simply an unheld one.
+
 ## [1.0.42] - 2026-07-10
 
 ### Changed
