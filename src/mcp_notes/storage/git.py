@@ -73,24 +73,38 @@ class GitManager:
         inode of a lock somebody is holding, which is the failure the lock files
         are persistent to avoid in the first place.
 
-        Writes to `.git/info/exclude` rather than `.gitignore`: it is
-        per-checkout, is not itself version-controlled, and never touches a
-        file the user maintains. Idempotent, and best-effort, since failing to
-        write it is not a reason to refuse to store notes.
+        Writes to git's `info/exclude` rather than `.gitignore`: it is not
+        itself version-controlled and never touches a file the user maintains.
+        The path comes from `common_dir`, not `git_dir`, because git reads
+        `info/exclude` from the common directory; a linked worktree's own
+        `.git/worktrees/<name>/info/exclude` is not consulted, so the rule
+        would have no effect there. That also means the rule is shared with
+        every worktree of the repository.
+
+        Idempotent, and best-effort: a bare repository has no working tree to
+        exclude anything from, and failing to write the rule is not a reason to
+        refuse to store notes. Read and written as bytes, since an adopted
+        repository's exclude file need not be valid UTF-8 and mangling it would
+        be worse than skipping the rule.
         """
+        if repo.bare:
+            return
+        rule = LOCKS_EXCLUDE.encode()
         try:
-            exclude_path = Path(repo.git_dir) / "info" / "exclude"
+            exclude_path = Path(repo.common_dir) / "info" / "exclude"
+            prefix = b""
             if exclude_path.exists():
-                existing = exclude_path.read_text(encoding="utf-8")
-                if any(line.strip() == LOCKS_EXCLUDE for line in existing.splitlines()):
+                existing = exclude_path.read_bytes()
+                # Compared verbatim: leading whitespace is significant to git,
+                # so " .locks/" is a different rule and must not satisfy this.
+                if rule in existing.splitlines():
                     return
-                prefix = "" if existing.endswith("\n") or not existing else "\n"
+                if existing and not existing.endswith(b"\n"):
+                    prefix = b"\n"
             else:
                 exclude_path.parent.mkdir(parents=True, exist_ok=True)
-                existing = ""
-                prefix = ""
-            with exclude_path.open("a", encoding="utf-8") as f:
-                f.write(f"{prefix}{LOCKS_EXCLUDE}\n")
+            with exclude_path.open("ab") as f:
+                f.write(prefix + rule + b"\n")
             logger.debug(f"Excluded {LOCKS_EXCLUDE} in {exclude_path}")
         except OSError as e:
             logger.warning(f"Could not exclude {LOCKS_EXCLUDE} from git: {e}")

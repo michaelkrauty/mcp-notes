@@ -192,13 +192,88 @@ class TestLockDirectoryStaysOutOfGit:
     create must still exclude them: untracked clutter is the mild outcome, a
     checkout or sync replacing a held lock's inode is the serious one."""
 
-    def test_adopted_repository_gets_an_exclude(self, tmp_path: Path) -> None:
-        Repo.init(tmp_path)
+    @staticmethod
+    def _is_ignored(repo: Repo, relative: str) -> bool:
+        """Ask git itself, rather than trusting the file we wrote."""
+        return bool(repo.ignored(relative))
+
+    def test_adopted_repository_ignores_the_lock_directory(self, tmp_path: Path) -> None:
+        repo = Repo.init(tmp_path)
+        (tmp_path / ".locks").mkdir()
+        (tmp_path / ".locks" / "held.lock").touch()
+        assert not self._is_ignored(repo, ".locks/held.lock")
+
         manager = GitManager(notes_dir=tmp_path)
 
         assert manager.repo is not None
-        exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
-        assert LOCKS_EXCLUDE in exclude.splitlines()
+        assert self._is_ignored(repo, ".locks/held.lock")
+
+    def test_linked_worktree_ignores_the_lock_directory(self, tmp_path: Path) -> None:
+        """Regression: the rule was written to the worktree's own git
+        directory, which git does not read `info/exclude` from, so it had no
+        effect. It belongs in the common directory."""
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        repo = Repo.init(origin)
+        (origin / "seed.txt").write_text("seed")
+        repo.index.add(["seed.txt"])
+        repo.index.commit("seed")
+
+        linked = tmp_path / "linked"
+        repo.git.worktree("add", str(linked))
+        (linked / ".locks").mkdir()
+        (linked / ".locks" / "held.lock").touch()
+
+        manager = GitManager(notes_dir=linked)
+        assert manager.repo is not None
+
+        linked_repo = Repo(linked)
+        assert self._is_ignored(linked_repo, ".locks/held.lock")
+
+    def test_a_non_utf8_exclude_file_is_not_fatal(self, tmp_path: Path) -> None:
+        """An adopted repository's exclude file need not be valid UTF-8."""
+        repo = Repo.init(tmp_path)
+        exclude_path = tmp_path / ".git" / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_bytes(b"# caf\xe9\nscratch/\n")
+        (tmp_path / ".locks").mkdir()
+        (tmp_path / ".locks" / "held.lock").touch()
+
+        manager = GitManager(notes_dir=tmp_path)
+
+        assert manager.repo is not None
+        assert self._is_ignored(repo, ".locks/held.lock")
+        assert b"# caf\xe9" in exclude_path.read_bytes()
+
+    def test_a_whitespace_prefixed_rule_does_not_count(self, tmp_path: Path) -> None:
+        """Leading whitespace is significant to git, so " .locks/" is a
+        different rule and must not be mistaken for this one."""
+        repo = Repo.init(tmp_path)
+        exclude_path = tmp_path / ".git" / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_text(f" {LOCKS_EXCLUDE}\n", encoding="utf-8")
+        (tmp_path / ".locks").mkdir()
+        (tmp_path / ".locks" / "held.lock").touch()
+
+        manager = GitManager(notes_dir=tmp_path)
+
+        assert manager.repo is not None
+        assert self._is_ignored(repo, ".locks/held.lock")
+
+    def test_a_bare_repository_is_left_alone(self, tmp_path: Path) -> None:
+        """There is no working tree to exclude anything from."""
+        bare = tmp_path / "bare.git"
+        Repo.init(bare, bare=True)
+
+        exclude_path = bare / "info" / "exclude"
+        before = exclude_path.read_bytes() if exclude_path.exists() else None
+
+        manager = GitManager(notes_dir=bare)
+        assert manager.repo is not None
+
+        after = exclude_path.read_bytes() if exclude_path.exists() else None
+        assert after == before
+        assert after is None or LOCKS_EXCLUDE.encode() not in after.splitlines()
 
     def test_exclude_is_written_once(self, tmp_path: Path) -> None:
         Repo.init(tmp_path)
