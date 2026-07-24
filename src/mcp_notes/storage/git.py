@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 LOCKS_EXCLUDE = ".locks/"
 
 
+def _exclude_patterns(content: bytes) -> list[bytes]:
+    """Split an exclude file into patterns the way git does.
+
+    Git ends a pattern at a newline and strips at most one carriage return
+    immediately before it. A lone carriage return is an ordinary character, so
+    ``bytes.splitlines()`` is wrong here: it would treat one as a separator and
+    find a rule git does not see.
+    """
+    return [line[:-1] if line.endswith(b"\r") else line for line in content.split(b"\n")]
+
+
 class GitManager:
     """
     Git-based versioning for notes.
@@ -97,7 +108,12 @@ class GitManager:
                 existing = exclude_path.read_bytes()
                 # Compared verbatim: leading whitespace is significant to git,
                 # so " .locks/" is a different rule and must not satisfy this.
-                if rule in existing.splitlines():
+                # Split the way git does rather than with splitlines(), which
+                # also breaks on a lone carriage return; git ends a pattern at a
+                # newline and strips at most one carriage return before it, so
+                # "scratch/\r.locks/" is one ineffective pattern to git and must
+                # not read as an existing rule here.
+                if rule in _exclude_patterns(existing):
                     return
                 if existing and not existing.endswith(b"\n"):
                     prefix = b"\n"

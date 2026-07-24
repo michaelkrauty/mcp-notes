@@ -260,6 +260,24 @@ class TestLockDirectoryStaysOutOfGit:
         assert manager.repo is not None
         assert self._is_ignored(repo, ".locks/held.lock")
 
+    def test_a_carriage_return_does_not_hide_a_missing_rule(self, tmp_path: Path) -> None:
+        """Git ends a pattern at a newline, not at a lone carriage return.
+
+        `b"scratch/\\r.locks/"` is a single ineffective pattern to git, so the
+        rule is genuinely absent and must still be appended.
+        """
+        repo = Repo.init(tmp_path)
+        exclude_path = tmp_path / ".git" / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_bytes(b"scratch/\r" + LOCKS_EXCLUDE.encode() + b"\n")
+        (tmp_path / ".locks").mkdir()
+        (tmp_path / ".locks" / "held.lock").touch()
+
+        manager = GitManager(notes_dir=tmp_path)
+
+        assert manager.repo is not None
+        assert self._is_ignored(repo, ".locks/held.lock")
+
     def test_a_bare_repository_is_left_alone(self, tmp_path: Path) -> None:
         """There is no working tree to exclude anything from."""
         bare = tmp_path / "bare.git"
