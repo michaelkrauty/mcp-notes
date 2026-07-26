@@ -29,6 +29,8 @@ from mcp_notes.server import (
 )
 from mcp_notes.services.note_service import NoteService
 
+from .conftest import requires_full_stack
+
 
 class TestResourceManagement:
     """Tests for resource management functions."""
@@ -311,6 +313,7 @@ requires_qdrant = pytest.mark.skipif(
 )
 
 
+@requires_full_stack
 class TestSearchNotes:
     """Tests for search_notes tool."""
 

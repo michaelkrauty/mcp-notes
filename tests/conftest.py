@@ -1,8 +1,52 @@
 """Shared pytest fixtures for mcp-notes tests."""
 
-import asyncio
+import os
 
-import pytest
+# Settings read the environment once, at import, and an unset embedding
+# dimension leaves collection creation raising "embedding_dim not yet
+# initialized" for any test that stores a vector. Tests that build vectors
+# themselves only need the dimension to be *some* consistent number, so
+# default one here rather than leaving the suite dependent on whatever the
+# developer happens to export. This must run before anything imports the
+# settings object.
+#
+# setdefault, not assignment: a developer running the suite against a real
+# embedding service exports the dimension that service actually returns, and
+# overriding it would guarantee a mismatch.
+os.environ.setdefault("VECTOR_EMBEDDING_DIM", "128")
+
+import asyncio  # noqa: E402 - must follow the environment default above
+
+import pytest  # noqa: E402 - must follow the environment default above
+
+
+def qdrant_and_embeddings_available() -> bool:
+    """Check if both Qdrant and the embedding service are reachable."""
+    import httpx
+
+    from mcp_notes.settings import settings
+
+    try:
+        qdrant_ok = (
+            httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0).status_code
+            == 200
+        )
+        embed_ok = (
+            httpx.get(f"{settings.embedding_url}/v1/models", timeout=2.0).status_code
+            == 200
+        )
+        return qdrant_ok and embed_ok
+    except Exception:
+        return False
+
+
+# Tests that index or search for real need both services. Without them the
+# work fails at the first embedding call, which says nothing about the code
+# under test, so they are skipped rather than failed.
+requires_full_stack = pytest.mark.skipif(
+    not qdrant_and_embeddings_available(),
+    reason="Qdrant and/or embedding service not available",
+)
 
 
 @pytest.fixture

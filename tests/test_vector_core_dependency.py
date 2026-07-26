@@ -26,10 +26,10 @@ def test_readme_install_example_uses_current_vector_core_pin() -> None:
     assert "vector-core.git@v1.4.0" in readme
     assert "mcp-notes.git@v1.0.0" not in readme
 
-def test_project_version_is_v1_0_45() -> None:
+def test_project_version_is_v1_0_46() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert pyproject["project"]["version"] == "1.0.45"
+    assert pyproject["project"]["version"] == "1.0.46"
 
 
 def test_runtime_version_matches_project_metadata() -> None:

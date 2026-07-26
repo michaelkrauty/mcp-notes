@@ -539,7 +539,7 @@ wheels = [
 
 [[package]]
 name = "mcp-notes"
-version = "1.0.45"
+version = "1.0.46"
 source = { editable = "." }
 dependencies = [
     { name = "gitpython" },
@@ -551,7 +551,7 @@ dependencies = [
     { name = "vector-core" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
@@ -566,22 +566,25 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "gitpython", specifier = "~=3.1" },
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100.0" },
     { name = "mcp", specifier = "~=1.25.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = "~=2.0" },
     { name = "pydantic-settings", specifier = "~=2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12.0" },
     { name = "pyyaml", specifier = "~=6.0" },
     { name = "qdrant-client", specifier = "~=1.16.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.4.0" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.100.0" },
+    { name = "mypy", specifier = ">=1.0.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest-mock", specifier = ">=3.12.0" },
+    { name = "ruff", specifier = ">=0.1.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.0" },
+]
 
 [[package]]
 name = "mypy"

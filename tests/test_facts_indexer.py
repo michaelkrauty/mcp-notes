@@ -7,6 +7,8 @@ import pytest
 
 from mcp_notes.facts import Fact, FactIndexer, FactStore, generate_fact_text
 
+from .conftest import requires_full_stack
+
 
 class TestGenerateFactText:
     """Tests for generate_fact_text function."""
@@ -119,6 +121,7 @@ class TestFactIndexer:
         assert name1 == name2  # Same value (cached)
 
 
+@requires_full_stack
 class TestFactIndexerIntegration:
     """Integration tests requiring Qdrant (skipped if unavailable)."""
 
