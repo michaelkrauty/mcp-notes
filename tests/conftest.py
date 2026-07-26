@@ -1,8 +1,103 @@
 """Shared pytest fixtures for mcp-notes tests."""
 
-import asyncio
+import os
 
-import pytest
+# Settings read the environment once, at import, and an unset embedding
+# dimension leaves collection creation raising "embedding_dim not yet
+# initialized" for any test that stores a vector. The suite therefore needs a
+# dimension established before anything imports the settings object, which is
+# why this runs at the top of the root conftest.
+#
+# It cannot simply be a constant. Leaving the dimension unset is what lets the
+# library auto-detect it from the first embedding call, so hardcoding one would
+# silently pin the suite to a width the configured service may not return, and
+# every collection built from it would be incompatible. So: ask the service.
+# One request settles both questions this suite needs answered — whether the
+# service is usable at all, and how wide its vectors are.
+
+_FALLBACK_EMBEDDING_DIM = 128
+
+
+def _probe_embedding_service() -> int | None:
+    """Return the configured service's embedding width, or None if unusable.
+
+    Deliberately a real embedding request rather than a liveness ping: a
+    service can serve /v1/models while rejecting the configured model, and a
+    ping cannot report a dimension. Any failure means the full-stack tests
+    could not have run anyway.
+    """
+    url = os.environ.get("VECTOR_EMBEDDING_URL", "http://localhost:8080")
+    model = os.environ.get("VECTOR_EMBEDDING_MODEL", "")
+    try:
+        import httpx
+
+        response = httpx.post(
+            f"{url.rstrip('/')}/v1/embeddings",
+            json={"model": model, "input": "probe"},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return None
+        return len(response.json()["data"][0]["embedding"]) or None
+    except Exception:
+        return None
+
+
+EMBEDDING_DIM_FROM_SERVICE = (
+    None if os.environ.get("VECTOR_EMBEDDING_DIM") else _probe_embedding_service()
+)
+
+# An explicitly exported dimension always wins: a developer pointing the suite
+# at a specific service has already said what width to expect.
+os.environ.setdefault(
+    "VECTOR_EMBEDDING_DIM",
+    str(EMBEDDING_DIM_FROM_SERVICE or _FALLBACK_EMBEDDING_DIM),
+)
+
+import asyncio  # noqa: E402 - must follow the environment default above
+
+import pytest  # noqa: E402 - must follow the environment default above
+
+
+def qdrant_and_embeddings_available() -> bool:
+    """Whether the full stack can actually serve these tests.
+
+    The embedding half is checked by embedding something, not by pinging
+    /v1/models: a service can list models while rejecting the configured one,
+    and only a real response reveals the vector width. That width has to match
+    what settings expect, because a mismatch fails every upsert for reasons
+    that say nothing about the code under test.
+    """
+    import httpx
+
+    from mcp_notes.settings import settings
+
+    try:
+        if (
+            httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0).status_code
+            != 200
+        ):
+            return False
+
+        response = httpx.post(
+            f"{settings.embedding_url.rstrip('/')}/v1/embeddings",
+            json={"model": settings.embedding_model, "input": "probe"},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return False
+        return len(response.json()["data"][0]["embedding"]) == settings.embedding_dim
+    except Exception:
+        return False
+
+
+# Tests that index or search for real need both services. Without them the
+# work fails at the first embedding call, which says nothing about the code
+# under test, so they are skipped rather than failed.
+requires_full_stack = pytest.mark.skipif(
+    not qdrant_and_embeddings_available(),
+    reason="Qdrant and/or embedding service not available",
+)
 
 
 @pytest.fixture

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.46] - 2026-07-25
+
+### Fixed
+
+- **The test suite no longer depends on the developer's ambient environment to pass.** Settings read the embedding dimension from the environment once, at import, and left it at zero when unset, so every test that stored a vector failed with `embedding_dim not yet initialized` — 34 failing or erroring tests on a clean checkout. Tests that build their own vectors only need the dimension to be some consistent number, so the suite defaults one. An explicitly exported dimension still wins, because a developer running against a real embedding service needs the dimension that service actually returns.
+- **Tests that require a live embedding service are skipped when one is not reachable, rather than failing.** `TestFactIndexerIntegration` documented itself as "skipped if unavailable" while carrying no skip condition at all, and the search and fact-indexing integration modules had none either, so all of them failed at the first embedding call on a checkout without the service. A shared `requires_full_stack` marker now guards them. A clean checkout with no services reports 765 passed and 32 skipped.
+
+### Changed
+
+- **Development dependencies moved from an extra to a PEP 735 dependency group.** `uv sync` installs a dependency group by default but skips an extra unless it is named, so the project environment was left without pytest and `uv run pytest` silently fell through to whatever pytest was on `PATH`. That interpreter brought its own installed `vector-core`, meaning the suite could report on a different copy of the library than the one this project pins. Deployments that want a lean environment can pass `uv sync --no-default-groups`.
+
+
 ## [1.0.45] - 2026-07-25
 
 ### Changed

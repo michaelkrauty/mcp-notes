@@ -4,6 +4,11 @@ import pytest
 
 from mcp_notes.server import add_fact, add_facts_batch, search_facts
 
+from ..conftest import requires_full_stack
+
+# Every test here indexes or searches for real.
+pytestmark = requires_full_stack
+
 
 @pytest.mark.asyncio
 async def test_add_fact_is_immediately_semantically_searchable(tmp_notes_dir):

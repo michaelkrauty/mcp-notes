@@ -4,7 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from ..conftest import requires_full_stack
 
+
+
+@requires_full_stack
 class TestHybridSearch:
     """Integration tests for hybrid search functionality."""
 
@@ -205,6 +209,7 @@ class TestFindSimilar:
         assert note_id not in result_ids
 
 
+@requires_full_stack
 class TestReindexNotes:
     """Tests for reindex functionality."""
 
@@ -229,6 +234,7 @@ class TestReindexNotes:
         assert isinstance(results, list)
 
 
+@requires_full_stack
 class TestSearchWithDateFilters:
     """Tests for date-based search filters."""
 
@@ -268,6 +274,7 @@ class TestSearchWithDateFilters:
         assert len(results) > 0
 
 
+@requires_full_stack
 class TestSearchEdgeCases:
     """Edge case tests for search functionality."""
 
