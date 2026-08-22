@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0] - 2026-08-21
+
+### Added
+
+- **The server now supports the stateless MCP `2026-07-28` protocol.** Modern requests carry their protocol version and client capabilities independently, receive server identity in each result, and use `server/discover` instead of a connection-scoped initialization handshake. The MCP Python SDK v2 supplies the wire validation, required `resultType` and cache metadata, cancellation behavior, and stdio framing.
+- Protocol tests exercise modern and legacy negotiation, deterministic `tools/list` ordering, resource discovery, and side-effect-free tool dispatch against the real registered surface without reading note data. They also verify the conservative `ttlMs: 0`, `cacheScope: "private"` defaults used for static listings.
+
+### Fixed
+
+- Startup auto-indexing and async resource cleanup now run inside `MCPServer`'s lifespan on the serving event loop, preventing cached clients from being reused after their original loop closes.
+- Successful note, tag, category, and version mutations now publish resource-update events for the server's dynamic `notes://` resources to modern subscription streams.
+
+### Changed
+
+- Replaced the removed `FastMCP` API with `MCPServer` and now publish the package version through its public constructor instead of mutating the private low-level server.
+- Upgraded to `mcp~=2.0.0` and pinned vector-core v1.4.2 for its SDK v2-compatible registration checks. SDK v2 serves `2025-11-25` and earlier handshake-based clients from the same stdio process, so existing clients remain supported while modern clients use the stateless path.
+
 ## [1.0.46] - 2026-07-25
 
 ### Fixed

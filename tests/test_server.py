@@ -117,6 +117,7 @@ class TestResourceManagement:
     async def test_cleanup_async_resources(self):
         """Cleanup function is async."""
         import inspect
+
         assert inspect.iscoroutinefunction(cleanup_async_resources)
 
 
@@ -300,6 +301,7 @@ class TestDeleteNote:
 def qdrant_available() -> bool:
     """Check if Qdrant is running."""
     import httpx
+
     try:
         response = httpx.get("http://localhost:6333/collections", timeout=2.0)
         return response.status_code == 200
@@ -308,8 +310,7 @@ def qdrant_available() -> bool:
 
 
 requires_qdrant = pytest.mark.skipif(
-    not qdrant_available(),
-    reason="Qdrant not available at localhost:6333"
+    not qdrant_available(), reason="Qdrant not available at localhost:6333"
 )
 
 
@@ -456,6 +457,7 @@ class TestListNotes:
     @pytest.mark.asyncio
     async def test_list_notes_invalid_sort_by_fails_fast(self, monkeypatch):
         """sort_by is validated before any store access (no I/O on bad input)."""
+
         def boom():
             raise AssertionError("get_store must not be called for an invalid sort_by")
 
@@ -491,6 +493,7 @@ class TestGetFactsWithStaleSources:
     @pytest.mark.asyncio
     async def test_invalid_status_fails_fast(self, monkeypatch):
         """status is validated before the integrity manager is accessed."""
+
         def boom():
             raise AssertionError("get_integrity_manager must not be called for invalid status")
 
@@ -836,9 +839,7 @@ class TestMoveCategory:
         assert result["updated_count"] == 2
 
     @pytest.mark.asyncio
-    async def test_move_category_matches_unslugified_old_path(
-        self, tmp_notes_dir, monkeypatch
-    ):
+    async def test_move_category_matches_unslugified_old_path(self, tmp_notes_dir, monkeypatch):
         """old_path/new_path are normalized to the stored slug form, so a
         human-form old_path ("Work & Projects") matches notes stored under
         "work-projects" instead of silently moving nothing."""
@@ -868,9 +869,7 @@ class TestMoveCategory:
         assert moved[0]["category"] == "archive"
 
     @pytest.mark.asyncio
-    async def test_move_category_records_git_move_not_duplicate(
-        self, tmp_notes_dir, monkeypatch
-    ):
+    async def test_move_category_records_git_move_not_duplicate(self, tmp_notes_dir, monkeypatch):
         """A category move must be committed as a git MOVE, so the note is not
         left in history at BOTH the old and new paths (which would also leave
         the working tree dirty with an unstaged deletion of the old path)."""
@@ -894,15 +893,11 @@ class TestMoveCategory:
         repo = get_git().repo
         assert repo is not None  # git is enabled in tests
         md_paths = [
-            blob.path
-            for blob in repo.head.commit.tree.traverse()
-            if blob.path.endswith(".md")
+            blob.path for blob in repo.head.commit.tree.traverse() if blob.path.endswith(".md")
         ]
         # Committed at the new path only, not duplicated at the old path.
         assert any("new/" in p for p in md_paths), f"new path missing: {md_paths}"
-        assert not any("old/" in p for p in md_paths), (
-            f"note duplicated in git history: {md_paths}"
-        )
+        assert not any("old/" in p for p in md_paths), f"note duplicated in git history: {md_paths}"
         # No leftover unstaged deletion of the old path.
         assert not repo.is_dirty(untracked_files=False), (
             f"working tree dirty after move: {repo.git.status('--short')}"
@@ -920,9 +915,7 @@ class TestDeleteUpdateRace:
     """
 
     @pytest.mark.asyncio
-    async def test_delete_commits_against_current_path_after_concurrent_move(
-        self, tmp_notes_dir
-    ):
+    async def test_delete_commits_against_current_path_after_concurrent_move(self, tmp_notes_dir):
         created = await create_note(title="N", content="Body", category="old")
         note_id = UUID(created["id"])
 
@@ -949,9 +942,7 @@ class TestDeleteUpdateRace:
 
         repo = git.repo
         md_paths = [
-            blob.path
-            for blob in repo.head.commit.tree.traverse()
-            if blob.path.endswith(".md")
+            blob.path for blob in repo.head.commit.tree.traverse() if blob.path.endswith(".md")
         ]
         # The note is fully removed from git HEAD (not stranded at its new path).
         assert md_paths == [], f"note still committed after delete: {md_paths}"
@@ -960,9 +951,7 @@ class TestDeleteUpdateRace:
         )
 
     @pytest.mark.asyncio
-    async def test_commit_delete_removes_git_tracked_path_when_store_diverged(
-        self, tmp_notes_dir
-    ):
+    async def test_commit_delete_removes_git_tracked_path_when_store_diverged(self, tmp_notes_dir):
         """If the store moved the note to a new path but its git move has not
         committed (the two can diverge mid-rename, even across processes), a
         deletion against the new path must still remove the path git actually
@@ -982,24 +971,18 @@ class TestDeleteUpdateRace:
 
         repo = git.repo
         md_paths = [
-            blob.path
-            for blob in repo.head.commit.tree.traverse()
-            if blob.path.endswith(".md")
+            blob.path for blob in repo.head.commit.tree.traverse() if blob.path.endswith(".md")
         ]
         assert md_paths == [], f"note still committed after delete: {md_paths}"
 
     @pytest.mark.asyncio
-    async def test_commit_delete_matches_filename_uuid_not_path_substring(
-        self, tmp_notes_dir
-    ):
+    async def test_commit_delete_matches_filename_uuid_not_path_substring(self, tmp_notes_dir):
         """Resolving the tracked path by UUID must match the filename, not a
         substring of the whole path: an unrelated note whose category or slug
         merely contains the target UUID must never be deleted by mistake."""
         target_id = uuid4()  # a note that is not tracked in git
         # An unrelated note whose category embeds the target UUID as a substring.
-        other = await create_note(
-            title="Other", content="y", category=f"ref-{target_id}"
-        )
+        other = await create_note(title="Other", content="y", category=f"ref-{target_id}")
         other_id = UUID(other["id"])
         git = get_git()
 
@@ -1009,9 +992,7 @@ class TestDeleteUpdateRace:
 
         repo = git.repo
         md_paths = [
-            blob.path
-            for blob in repo.head.commit.tree.traverse()
-            if blob.path.endswith(".md")
+            blob.path for blob in repo.head.commit.tree.traverse() if blob.path.endswith(".md")
         ]
         assert any(str(other_id) in p for p in md_paths), (
             f"unrelated note wrongly deleted: {md_paths}"
@@ -1053,15 +1034,24 @@ class TestCleanupAsyncResources:
         import mcp_notes.singletons as singletons_module
 
         # Initialize resources
-        await get_indexer()
+        first_service = await singletons_module.get_note_service()
         await get_search()
 
         # Cleanup
         await cleanup_async_resources()
 
         # AsyncSingleton instances should not be initialized after cleanup
+        assert not singletons_module._note_service.is_initialized
         assert not singletons_module._indexer.is_initialized
         assert not singletons_module._search_engine.is_initialized
+
+        # A new lifespan must not reuse a service that retained the closed indexer.
+        second_service = await singletons_module.get_note_service()
+        assert second_service is not first_service
+
+        await cleanup_async_resources()
+        assert not singletons_module._note_service.is_initialized
+        assert not singletons_module._indexer.is_initialized
 
 
 class TestMCPResources:

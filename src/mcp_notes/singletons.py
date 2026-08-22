@@ -4,6 +4,7 @@ Provides thread-safe lazy initialization for all shared resources.
 """
 
 import atexit
+from typing import Any
 
 from vector_core import (
     AsyncSingleton,
@@ -22,11 +23,10 @@ from mcp_notes.facts import (
 )
 from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.links.resolver import LinkResolver
-from mcp_notes.services import NoteService
 from mcp_notes.search.engine import NoteSearchEngine
+from mcp_notes.services import NoteService
 from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.git import GitManager
-
 
 # ============= Sync Singletons =============
 # Provides thread-safe initialization with reentrant lock
@@ -51,8 +51,10 @@ _note_service: AsyncSingleton[NoteService] = AsyncSingleton("note_service")
 
 # ============= Sync Getters =============
 
+
 def get_store() -> NoteStore:
     """Get or create NoteStore instance (thread-safe via SyncSingleton)."""
+
     def _create_store() -> NoteStore:
         store = NoteStore()
         store.ensure_directories()
@@ -83,15 +85,15 @@ def get_fact_store() -> FactStore:
 
 def get_integrity_manager() -> SourceIntegrityManager:
     """Get or create SourceIntegrityManager instance (thread-safe via SyncSingleton)."""
-    return _integrity_manager.get(
-        lambda: SourceIntegrityManager(fact_store=get_fact_store())
-    )
+    return _integrity_manager.get(lambda: SourceIntegrityManager(fact_store=get_fact_store()))
 
 
 # ============= Async Getters =============
 
+
 async def get_indexer() -> NoteIndexer:
     """Get or create NoteIndexer instance (async-safe via AsyncSingleton)."""
+
     async def _create_indexer() -> NoteIndexer:
         indexer = NoteIndexer(note_store=get_store())
         await indexer._ensure_global_vocab()
@@ -102,6 +104,7 @@ async def get_indexer() -> NoteIndexer:
 
 async def get_search() -> NoteSearchEngine:
     """Get or create NoteSearchEngine instance (async-safe via AsyncSingleton)."""
+
     async def _create_search_engine() -> NoteSearchEngine:
         engine = NoteSearchEngine(note_store=get_store())
         await engine._ensure_global_vocab()
@@ -112,6 +115,7 @@ async def get_search() -> NoteSearchEngine:
 
 async def get_glossary_indexer() -> GlossaryIndexer:
     """Get or create GlossaryIndexer instance (async-safe via AsyncSingleton)."""
+
     async def _create_glossary_indexer() -> GlossaryIndexer:
         # Get indexer for shared resources
         indexer = await get_indexer()
@@ -128,6 +132,7 @@ async def get_glossary_indexer() -> GlossaryIndexer:
 
 async def get_fact_indexer() -> FactIndexer:
     """Get or create FactIndexer instance (async-safe via AsyncSingleton)."""
+
     async def _create_fact_indexer() -> FactIndexer:
         # Get indexer for shared resources
         indexer = await get_indexer()
@@ -144,6 +149,7 @@ async def get_fact_indexer() -> FactIndexer:
 
 async def get_note_service() -> NoteService:
     """Get or create NoteService instance (async-safe via AsyncSingleton)."""
+
     async def _create_note_service() -> NoteService:
         return NoteService(
             store=get_store(),
@@ -157,18 +163,37 @@ async def get_note_service() -> NoteService:
 
 # ============= Cleanup =============
 
+
 async def cleanup_async_resources() -> None:
     """Cleanup async resources on shutdown using AsyncSingleton's cleanup."""
-    # Close all async singletons using their proper cleanup handlers
-    await _indexer.close(lambda i: i.close() if hasattr(i, 'close') else None)
-    await _search_engine.close(lambda s: s.close() if hasattr(s, 'close') else None)
-    await _glossary_indexer.close(lambda g: g.close() if hasattr(g, 'close') else None)
-    await _fact_indexer.close(lambda f: f.close() if hasattr(f, 'close') else None)
+    # Release dependents before the shared indexer and its clients.
+    await _note_service.close()
+    await _fact_indexer.close(lambda f: f.close() if hasattr(f, "close") else None)
+    await _glossary_indexer.close(lambda g: g.close() if hasattr(g, "close") else None)
+    await _search_engine.close(lambda s: s.close() if hasattr(s, "close") else None)
+    await _indexer.close(lambda i: i.close() if hasattr(i, "close") else None)
+
+    # close() returns early when initialization failed before producing an
+    # instance, so reset explicitly to clear cached errors and loop-bound locks.
+    for singleton in (
+        _note_service,
+        _fact_indexer,
+        _glossary_indexer,
+        _search_engine,
+        _indexer,
+    ):
+        singleton.reset()
 
 
 def _sync_cleanup() -> None:
     """Sync wrapper for cleanup, called on exit."""
-    singletons = [_indexer, _search_engine, _glossary_indexer, _fact_indexer]
+    singletons: list[AsyncSingleton[Any]] = [
+        _note_service,
+        _indexer,
+        _search_engine,
+        _glossary_indexer,
+        _fact_indexer,
+    ]
     if not any(s.is_initialized for s in singletons):
         return
     sync_cleanup_wrapper(cleanup_async_resources, singletons)

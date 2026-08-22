@@ -9,9 +9,10 @@ Tools:
 
 from uuid import UUID
 
+from mcp.server.mcpserver import Context
 from vector_core.errors import ErrorCode, error_response
 
-from mcp_notes.app import mcp
+from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.singletons import get_note_service
 
 
@@ -21,6 +22,7 @@ async def create_note(
     content: str,
     tags: list[str] | None = None,
     category: str | None = None,
+    context: Context | None = None,
 ) -> dict:
     """
     Create a new note with auto-generated UUID.
@@ -36,6 +38,8 @@ async def create_note(
     """
     service = await get_note_service()
     result = await service.create(title=title, content=content, tags=tags, category=category)
+    if result.success:
+        await notify_note_resources(context)
     return result.to_dict()
 
 
@@ -67,6 +71,7 @@ async def update_note(
     content: str | None = None,
     tags: list[str] | None = None,
     category: str | None = None,
+    context: Context | None = None,
 ) -> dict:
     """
     Update an existing note. Only provided fields are updated.
@@ -94,11 +99,13 @@ async def update_note(
         tags=tags,
         category=category,
     )
+    if result.success:
+        await notify_note_resources(context)
     return result.to_dict()
 
 
 @mcp.tool()
-async def delete_note(note_id: str) -> dict:
+async def delete_note(note_id: str, context: Context | None = None) -> dict:
     """
     Delete a note. The note is removed from the filesystem and search index,
     but remains recoverable from git history.
@@ -118,5 +125,6 @@ async def delete_note(note_id: str) -> dict:
     result = await service.delete(uuid)
 
     if result.success:
+        await notify_note_resources(context)
         return {"success": True, "deleted_id": note_id}
     return result.to_dict()

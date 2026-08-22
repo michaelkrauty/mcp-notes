@@ -8,10 +8,11 @@ Tools:
 import logging
 from uuid import UUID
 
+from mcp.server.mcpserver import Context
 from vector_core import validate_limit
 from vector_core.errors import ErrorCode, error_response
 
-from mcp_notes.app import mcp
+from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.singletons import get_git, get_indexer, get_store
 from mcp_notes.storage.filesystem import NoteNotFoundError
 
@@ -48,7 +49,11 @@ async def get_note_history(note_id: str, limit: int = 10) -> list[dict]:
 
 
 @mcp.tool()
-async def restore_note_version(note_id: str, version_id: str) -> dict:
+async def restore_note_version(
+    note_id: str,
+    version_id: str,
+    context: Context | None = None,
+) -> dict:
     """
     Restore a note to a previous version (creates new commit).
 
@@ -102,6 +107,7 @@ async def restore_note_version(note_id: str, version_id: str) -> dict:
     # Return restored note
     try:
         note = store.read(uuid)
+        await notify_note_resources(context)
         return note.model_dump(mode="json")
     except NoteNotFoundError:
         return error_response(ErrorCode.NOTE_NOT_FOUND, "Restored note not found")

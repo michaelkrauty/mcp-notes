@@ -5,7 +5,9 @@ Tools:
 - move_category: Move/rename a category
 """
 
-from mcp_notes.app import mcp
+from mcp.server.mcpserver import Context
+
+from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.models import CategoryInfo, CategoryTree
 from mcp_notes.singletons import get_git, get_indexer, get_store
 from mcp_notes.storage.slugify import slugify_category_path
@@ -39,7 +41,11 @@ async def list_categories() -> dict:
 
 
 @mcp.tool()
-async def move_category(old_path: str, new_path: str) -> dict:
+async def move_category(
+    old_path: str,
+    new_path: str,
+    context: Context | None = None,
+) -> dict:
     """
     Move/rename a category.
 
@@ -72,7 +78,7 @@ async def move_category(old_path: str, new_path: str) -> dict:
 
             if is_exact_match or is_child_match:
                 # Replace prefix (preserve the child suffix)
-                new_category = new_norm + summary.category[len(old_norm):]
+                new_category = new_norm + summary.category[len(old_norm) :]
 
                 old_note_path = store.get_note_path(summary.id)
                 store.update(
@@ -86,20 +92,15 @@ async def move_category(old_path: str, new_path: str) -> dict:
                 # new path without removing the old, leaving the note in history
                 # at BOTH paths and the working tree dirty with an unstaged
                 # deletion. Mirrors NoteService.update's move detection.
-                if (
-                    old_note_path
-                    and new_note_path
-                    and old_note_path != new_note_path
-                ):
+                if old_note_path and new_note_path and old_note_path != new_note_path:
                     git.commit_move(old_note_path, new_note_path, summary.title)
                 else:
-                    git.commit_update(
-                        summary.id, summary.title, path=new_note_path
-                    )
+                    git.commit_update(summary.id, summary.title, path=new_note_path)
                 updated += 1
 
     # Re-index all
     if updated > 0:
+        await notify_note_resources(context)
         await indexer.index_all()
 
     return {"updated_count": updated}

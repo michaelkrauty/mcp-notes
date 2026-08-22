@@ -2,6 +2,8 @@
 
 MCP server for personal knowledge management with semantic search, git versioning, and knowledge graph capabilities.
 
+Supports stateless MCP `2026-07-28` requests and legacy MCP clients from the same stdio server through the official Python SDK v2.
+
 ## Prerequisites
 
 - **Python 3.12+**
@@ -15,7 +17,7 @@ MCP server for personal knowledge management with semantic search, git versionin
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.4.0
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.4.2
 pip install git+https://github.com/michaelkrauty/mcp-notes.git
 ```
 
