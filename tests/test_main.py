@@ -1,8 +1,11 @@
 """Tests for mcp-notes CLI entry point."""
 
-from unittest.mock import MagicMock
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from mcp import Client
 
 
 class TestStartup:
@@ -16,9 +19,16 @@ class TestStartup:
 
         # Enable auto-index
         monkeypatch.setattr(settings, "auto_index", True)
+        indexer = SimpleNamespace(
+            index_all=AsyncMock(return_value=SimpleNamespace(indexed_notes=2, total_notes=2))
+        )
+        get_indexer = AsyncMock(return_value=indexer)
+        monkeypatch.setattr(main_module, "get_indexer", get_indexer)
 
-        # Should not raise
         await main_module.startup()
+
+        get_indexer.assert_awaited_once_with()
+        indexer.index_all.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_startup_auto_index_disabled(self, tmp_notes_dir, monkeypatch):
@@ -28,9 +38,12 @@ class TestStartup:
 
         # Disable auto-index
         monkeypatch.setattr(settings, "auto_index", False)
+        get_indexer = AsyncMock()
+        monkeypatch.setattr(main_module, "get_indexer", get_indexer)
 
-        # Should not raise and should not index
         await main_module.startup()
+
+        get_indexer.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_startup_handles_index_error(self, tmp_notes_dir, monkeypatch):
@@ -86,3 +99,56 @@ class TestMain:
         # Check that settings were logged
         log_text = caplog.text
         assert "Starting mcp-notes server" in log_text or "mcp-notes" in log_text
+
+
+@pytest.mark.asyncio
+async def test_server_lifespan_keeps_startup_and_cleanup_on_serving_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_notes import __main__ as main_module  # noqa: PLC0415
+    from mcp_notes import singletons  # noqa: PLC0415
+    from mcp_notes.server import mcp  # noqa: PLC0415
+
+    events: list[tuple[str, asyncio.AbstractEventLoop]] = []
+
+    async def fake_startup() -> None:
+        events.append(("startup", asyncio.get_running_loop()))
+
+    async def fake_cleanup() -> None:
+        events.append(("cleanup", asyncio.get_running_loop()))
+
+    monkeypatch.setattr(main_module, "startup", fake_startup)
+    monkeypatch.setattr(singletons, "cleanup_async_resources", fake_cleanup)
+
+    async with Client(mcp, cache=None):
+        events.append(("serving", asyncio.get_running_loop()))
+
+    assert [name for name, _ in events] == ["startup", "serving", "cleanup"]
+    assert len({id(loop) for _, loop in events}) == 1
+
+
+@pytest.mark.asyncio
+async def test_server_lifespan_cleans_up_cancelled_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_notes import __main__ as main_module  # noqa: PLC0415
+    from mcp_notes import singletons  # noqa: PLC0415
+    from mcp_notes.app import lifespan, mcp  # noqa: PLC0415
+
+    events: list[str] = []
+
+    async def cancelled_startup() -> None:
+        events.append("startup")
+        raise asyncio.CancelledError
+
+    async def fake_cleanup() -> None:
+        events.append("cleanup")
+
+    monkeypatch.setattr(main_module, "startup", cancelled_startup)
+    monkeypatch.setattr(singletons, "cleanup_async_resources", fake_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with lifespan(mcp):
+            pytest.fail("cancelled startup must not enter the serving phase")
+
+    assert events == ["startup", "cleanup"]

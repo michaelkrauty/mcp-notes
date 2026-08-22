@@ -1,6 +1,5 @@
 """Entry point for mcp-notes server."""
 
-import asyncio
 import logging
 
 from vector_core import verify_tools_registered
@@ -71,9 +70,7 @@ async def startup() -> None:
         try:
             indexer = await get_indexer()
             status = await indexer.index_all()
-            logger.info(
-                f"Indexed {status.indexed_notes}/{status.total_notes} notes"
-            )
+            logger.info(f"Indexed {status.indexed_notes}/{status.total_notes} notes")
         except Exception as e:
             logger.warning(f"Auto-index failed: {e}")
 
@@ -94,10 +91,7 @@ def main() -> None:
     # Verify all expected tools are registered (catches silent import failures)
     verify_tools_registered(mcp, EXPECTED_TOOLS, "mcp-notes")
 
-    # Run startup tasks
-    asyncio.run(startup())
-
-    # Run MCP server
+    # The MCPServer lifespan runs startup and cleanup on the serving event loop.
     mcp.run()
 
 

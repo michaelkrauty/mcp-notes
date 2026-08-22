@@ -6,9 +6,10 @@ Tools:
 - merge_tags: Merge multiple tags into one
 """
 
+from mcp.server.mcpserver import Context
 from vector_core.errors import ErrorCode, error_response
 
-from mcp_notes.app import mcp
+from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.constants import validate_tag as _validate_tag
 from mcp_notes.models import TagInfo
 from mcp_notes.singletons import get_git, get_indexer, get_store
@@ -29,16 +30,17 @@ async def list_tags() -> list[dict]:
         for tag in summary.tags:
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
-    tags = [
-        TagInfo(name=name, count=count)
-        for name, count in sorted(tag_counts.items())
-    ]
+    tags = [TagInfo(name=name, count=count) for name, count in sorted(tag_counts.items())]
 
     return [t.model_dump(mode="json") for t in tags]
 
 
 @mcp.tool()
-async def rename_tag(old_tag: str, new_tag: str) -> dict:
+async def rename_tag(
+    old_tag: str,
+    new_tag: str,
+    context: Context | None = None,
+) -> dict:
     """
     Rename a tag across all notes.
 
@@ -87,12 +89,17 @@ async def rename_tag(old_tag: str, new_tag: str) -> dict:
     # Re-index all
     if updated > 0:
         await indexer.index_all()
+        await notify_note_resources(context)
 
     return {"updated_count": updated}
 
 
 @mcp.tool()
-async def merge_tags(source_tags: list[str], target_tag: str) -> dict:
+async def merge_tags(
+    source_tags: list[str],
+    target_tag: str,
+    context: Context | None = None,
+) -> dict:
     """
     Merge multiple tags into one.
 
@@ -139,5 +146,6 @@ async def merge_tags(source_tags: list[str], target_tag: str) -> dict:
     # Re-index all
     if updated > 0:
         await indexer.index_all()
+        await notify_note_resources(context)
 
     return {"updated_count": updated}
