@@ -173,6 +173,17 @@ async def cleanup_async_resources() -> None:
     await _search_engine.close(lambda s: s.close() if hasattr(s, "close") else None)
     await _indexer.close(lambda i: i.close() if hasattr(i, "close") else None)
 
+    # close() returns early when initialization failed before producing an
+    # instance, so reset explicitly to clear cached errors and loop-bound locks.
+    for singleton in (
+        _note_service,
+        _fact_indexer,
+        _glossary_indexer,
+        _search_engine,
+        _indexer,
+    ):
+        singleton.reset()
+
 
 def _sync_cleanup() -> None:
     """Sync wrapper for cleanup, called on exit."""

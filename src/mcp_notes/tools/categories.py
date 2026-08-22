@@ -100,7 +100,7 @@ async def move_category(
 
     # Re-index all
     if updated > 0:
-        await indexer.index_all()
         await notify_note_resources(context)
+        await indexer.index_all()
 
     return {"updated_count": updated}

@@ -4,17 +4,19 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.shared.subscriptions import ResourceUpdated
 from mcp.types import TextContent
 
 from mcp_notes import __version__
 from mcp_notes.__main__ import EXPECTED_TOOLS, mcp
+from mcp_notes.app import NOTE_RESOURCE_URIS
 from mcp_notes.settings import settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +124,31 @@ async def test_note_mutation_publishes_resource_update(
 
     assert not result.is_error
     assert event == ResourceUpdated(uri="notes://index")
+
+
+@pytest.mark.asyncio
+async def test_bulk_mutation_notifies_before_reindex_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_notes.tools import tags as tags_tools  # noqa: PLC0415
+
+    store = MagicMock()
+    store.list_all.return_value = [SimpleNamespace(id="note-id", title="Test", tags=["old-tag"])]
+    git = MagicMock()
+    indexer = SimpleNamespace(index_all=AsyncMock(side_effect=RuntimeError("index failed")))
+    context = MagicMock(spec=Context)
+    context.notify_resource_updated = AsyncMock()
+
+    monkeypatch.setattr(tags_tools, "get_store", lambda: store)
+    monkeypatch.setattr(tags_tools, "get_git", lambda: git)
+    monkeypatch.setattr(tags_tools, "get_indexer", AsyncMock(return_value=indexer))
+
+    with pytest.raises(RuntimeError, match="index failed"):
+        await tags_tools.rename_tag("old-tag", "new-tag", context)
+
+    assert [
+        invocation.args[0] for invocation in context.notify_resource_updated.await_args_list
+    ] == list(NOTE_RESOURCE_URIS)
 
 
 @pytest.mark.asyncio

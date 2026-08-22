@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 from mcp import Client
 
@@ -135,20 +136,49 @@ async def test_server_lifespan_cleans_up_cancelled_startup(
     from mcp_notes import singletons  # noqa: PLC0415
     from mcp_notes.app import lifespan, mcp  # noqa: PLC0415
 
-    events: list[str] = []
+    startup_started = anyio.Event()
+    cleanup_finished = anyio.Event()
 
     async def cancelled_startup() -> None:
-        events.append("startup")
-        raise asyncio.CancelledError
+        startup_started.set()
+        await anyio.sleep_forever()
 
     async def fake_cleanup() -> None:
-        events.append("cleanup")
+        # This checkpoint is cancelled immediately unless the lifespan shields it.
+        await anyio.sleep(0)
+        cleanup_finished.set()
+
+    async def run_lifespan() -> None:
+        async with lifespan(mcp):
+            pytest.fail("cancelled startup must not enter the serving phase")
 
     monkeypatch.setattr(main_module, "startup", cancelled_startup)
     monkeypatch.setattr(singletons, "cleanup_async_resources", fake_cleanup)
 
-    with pytest.raises(asyncio.CancelledError):
-        async with lifespan(mcp):
-            pytest.fail("cancelled startup must not enter the serving phase")
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_lifespan)
+        await startup_started.wait()
+        task_group.cancel_scope.cancel()
 
-    assert events == ["startup", "cleanup"]
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_clears_failed_async_singleton_state() -> None:
+    from mcp_notes import singletons  # noqa: PLC0415
+    from mcp_notes.indexing.indexer import NoteIndexer  # noqa: PLC0415
+
+    await singletons.cleanup_async_resources()
+
+    async def fail_initialization() -> NoteIndexer:
+        raise RuntimeError("initialization failed")
+
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        await singletons._indexer.get(fail_initialization)
+
+    await singletons.cleanup_async_resources()
+
+    sentinel = MagicMock(spec=NoteIndexer)
+    assert await singletons._indexer.get(lambda: sentinel) is sentinel
+
+    await singletons.cleanup_async_resources()
