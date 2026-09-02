@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.1] - 2026-09-01
+
+### Fixed
+
+- **Create and category-changing update responses now return the canonical path-derived category.** Categories are slugified into directory paths, but `create_note` and `update_note` returned the caller's raw value. A response could therefore report `Work & Projects/Client (Main)` while the next read and indexed payload reported `work-projects/client-main`. Mutation responses now derive the category from the final path, matching reads and search while preserving root and unchanged categories.
+
+### Changed
+
+- Pinned vector-core to v1.4.3, which keeps each file lock on a stable inode so concurrent waiters cannot split across replaced lock files.
+
 ## [1.1.0] - 2026-08-21
 
 ### Added
