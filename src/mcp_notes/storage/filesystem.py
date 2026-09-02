@@ -274,9 +274,7 @@ class NoteStore:
             raise PathTraversalError(f"Cannot resolve path {path}: {e}") from e
 
         if not resolved.is_relative_to(self.notes_dir.resolve()):
-            raise PathTraversalError(
-                f"Path traversal detected: {path} escapes {self.notes_dir}"
-            )
+            raise PathTraversalError(f"Path traversal detected: {path} escapes {self.notes_dir}")
         return path
 
     def _build_note_path(
@@ -420,7 +418,7 @@ class NoteStore:
             title=title,
             content=file_content,
             tags=tags or [],
-            category=category,
+            category=self._category_from_path(path),
             links=inline_links,
             created=now,
             modified=now,
@@ -515,9 +513,7 @@ class NoteStore:
             new_body = content if content is not None else parsed.body
 
             if tags is not None:
-                new_tags = list(
-                    dict.fromkeys(n for n in (normalize_tag(t) for t in tags) if n)
-                )
+                new_tags = list(dict.fromkeys(n for n in (normalize_tag(t) for t in tags) if n))
             else:
                 new_tags = parsed.tags
 
@@ -584,7 +580,7 @@ class NoteStore:
                 title=new_title,
                 content=file_content,
                 tags=new_tags,
-                category=new_category,
+                category=self._category_from_path(new_path),
                 links=inline_links,
                 created=parsed.created,
                 modified=now,
@@ -663,8 +659,7 @@ class NoteStore:
             self._last_parse_errors = parse_errors
         if parse_errors:
             logger.error(
-                f"Failed to parse {len(parse_errors)} note(s). "
-                f"Use get_parse_errors() for details."
+                f"Failed to parse {len(parse_errors)} note(s). Use get_parse_errors() for details."
             )
 
         return summaries
@@ -703,8 +698,7 @@ class NoteStore:
             self._last_parse_errors = parse_errors
         if parse_errors:
             logger.error(
-                f"Failed to parse {len(parse_errors)} note(s). "
-                f"Use get_parse_errors() for details."
+                f"Failed to parse {len(parse_errors)} note(s). Use get_parse_errors() for details."
             )
 
     def get_parse_errors(self) -> list[NoteParseError]:
@@ -724,7 +718,7 @@ class NoteStore:
 
     def _to_summary(self, parsed: ParsedNote, category: str | None) -> NoteSummary:
         """Convert ParsedNote to NoteSummary with category from path."""
-        excerpt = parsed.body[:settings.excerpt_length]
+        excerpt = parsed.body[: settings.excerpt_length]
         if len(parsed.body) > settings.excerpt_length:
             # Try to break at word boundary
             last_space = excerpt.rfind(" ")

@@ -56,6 +56,7 @@ class TestNoteStoreInit:
     def test_default_dir(self, monkeypatch, tmp_path):
         """Uses settings dir by default."""
         from mcp_notes.settings import settings
+
         monkeypatch.setattr(settings, "dir", tmp_path)
 
         store = NoteStore()
@@ -125,6 +126,7 @@ class TestNoteStoreCreate:
 
         assert note.title == "Test Note"
         assert note.id is not None
+        assert note.category is None
         assert store.exists(note.id)
 
     def test_create_with_tags(self, tmp_path):
@@ -167,17 +169,21 @@ class TestNoteStoreCreate:
 
         assert note.tags == ["my-tag", "foo"]
 
-    def test_create_with_category(self, tmp_path):
-        """Creates note with category."""
+    def test_create_returns_canonical_path_category(self, tmp_path):
+        """Create returns the same canonical category as its path and later reads."""
         store = NoteStore(notes_dir=tmp_path)
 
         note = store.create(
             title="Categorized Note",
             content="Content",
-            category="projects/work",
+            category="Work & Projects/Client (Main)",
         )
 
-        assert note.category == "projects/work"
+        assert note.category == "work-projects/client-main"
+        assert store.read(note.id).category == note.category
+        note_path = store.get_note_path(note.id)
+        assert note_path is not None
+        assert note_path.parent.relative_to(store.notes_dir).as_posix() == note.category
 
     def test_create_with_custom_id(self, tmp_path):
         """Creates note with custom UUID."""
@@ -317,14 +323,18 @@ class TestNoteStoreUpdate:
 
         assert updated.tags == []
 
-    def test_update_category(self, tmp_path):
-        """Updates note category."""
+    def test_update_returns_canonical_path_category(self, tmp_path):
+        """A category-changing update returns the category used by reads and indexing."""
         store = NoteStore(notes_dir=tmp_path)
 
         note = store.create(title="Title", content="Content", category="old")
-        updated = store.update(note.id, category="new/path")
+        updated = store.update(note.id, category="Work & Projects/Client (Main)")
 
-        assert updated.category == "new/path"
+        assert updated.category == "work-projects/client-main"
+        assert store.read(note.id).category == updated.category
+        note_path = store.get_note_path(note.id)
+        assert note_path is not None
+        assert note_path.parent.relative_to(store.notes_dir).as_posix() == updated.category
 
     def test_update_clears_category(self, tmp_path):
         """Clears category when empty string provided."""
@@ -344,6 +354,7 @@ class TestNoteStoreUpdate:
 
         # Small delay to ensure different timestamp
         import time
+
         time.sleep(0.01)
 
         updated = store.update(note.id, content="New content")
@@ -720,6 +731,7 @@ Secret content""")
 
         # Get path to real note
         from mcp_notes.storage.slugify import build_filename
+
         real_path = tmp_path / "notes" / build_filename("Real Note", note.id)
 
         # Create symlink pointing to the real note
