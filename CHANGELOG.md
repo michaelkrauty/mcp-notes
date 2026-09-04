@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-09-04
+
+### Changed
+
+- Pinned vector-core to v1.5.0, enabling opt-in deployment-safe persistent embedding reuse and endpoint/model-scoped request scheduling shared across local MCP processes.
+
 ## [1.1.1] - 2026-09-01
 
 ### Fixed
