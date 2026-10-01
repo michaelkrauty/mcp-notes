@@ -26,6 +26,7 @@ from vector_core import (
 )
 from vector_core.embeddings.client import CircuitBreakerOpenError
 from vector_core.embeddings.global_vocab import GlobalVocabulary
+from vector_core.storage.embedding_migration import active_embedding_collection
 
 from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
 from mcp_notes.indexing.migration import ensure_notes_collection
@@ -123,6 +124,24 @@ class NoteSearchEngine:
         generation = await ensure_notes_collection(indexer)
         return generation.physical_name
 
+    async def _readable_collection(self) -> tuple[str, CircuitBreakerOpenError | None]:
+        try:
+            return await self._ready_collection(), None
+        except CircuitBreakerOpenError as error:
+            # Only an unavailable identity service permits sparse/filter reads
+            # of the retained target. Migration/source/schema errors still fail.
+            collection = await active_embedding_collection(self.storage, self.collection_name)
+            if collection is None:
+                raise
+            return collection, error
+
+    async def _embed_query(
+        self, query: str, readiness_error: CircuitBreakerOpenError | None
+    ) -> list[float]:
+        if readiness_error is not None:
+            raise readiness_error
+        return await self.embedder.embed_single_cached(query, role="query")
+
     async def search(
         self,
         query: str,
@@ -152,7 +171,7 @@ class NoteSearchEngine:
         Returns:
             List of SearchResult objects
         """
-        collection = await self._ready_collection()
+        collection, readiness_error = await self._readable_collection()
         limit = limit or settings.search_limit_default
         self._ensure_vocabulary_registered()
 
@@ -233,7 +252,7 @@ class NoteSearchEngine:
 
         try:
             # Get dense embeddings for hybrid search
-            dense_vector = await self.embedder.embed_single_cached(filters.query, role="query")
+            dense_vector = await self._embed_query(filters.query, readiness_error)
 
             # Perform hybrid search with RRF fusion
             points = await client.query_points(
@@ -317,7 +336,7 @@ class NoteSearchEngine:
         collection: str | None = None,
     ) -> list[SearchResult]:
         """Search using filters only (no semantic query)."""
-        collection = collection or await self._ready_collection()
+        collection = collection or (await self._readable_collection())[0]
         qdrant_filters = filters_to_qdrant(filters)
 
         # Add type filter

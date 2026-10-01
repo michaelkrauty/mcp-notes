@@ -227,18 +227,15 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force(self):
-        """Force reindex scopes its clear to note/chunk points.
-
-        Notes, chunks, glossary entries, and facts share one Qdrant collection,
-        so force must not delete and recreate the whole collection (which would
-        destroy the glossary and fact points, with no notes-side rebuild). It
-        clears only the note and chunk points, mirroring the facts indexer.
-        """
+        """Force reindex clears only known note groups from this source root."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_store.iter_all.return_value = iter([])
         mock_storage = AsyncMock()
         mock_storage.collection_exists.return_value = True
+        mock_store.notes_dir = mock_store.base_dir / "notes"
+        mock_store.get_note_path.return_value = mock_store.notes_dir / "known.md"
+        mock_storage.scroll_points.return_value = [{"type": "note", "note_id": str(UUID(int=1))}]
 
         indexer = NoteIndexer(
             note_store=mock_store,
@@ -250,10 +247,9 @@ class TestNoteIndexerIndexAll:
 
         # Must NOT nuke the shared collection (would destroy glossary + facts).
         mock_storage.delete_collection.assert_not_called()
-        # Clears only the note and chunk points.
-        cleared = {(c.args[1], c.args[2]) for c in mock_storage.delete_by_filter.call_args_list}
-        assert ("type", "note") in cleared
-        assert ("type", "chunk") in cleared
+        mock_storage.delete_by_filter.assert_awaited_once_with(
+            indexer.collection_name, field="note_id", value=str(UUID(int=1))
+        )
 
     @pytest.mark.asyncio
     async def test_index_all_partial_failure_accounting(self):
@@ -362,7 +358,7 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force_skips_orphan_pruning(self):
-        """Force mode clears all note/chunk points, so it does not scan for orphans."""
+        """Force clears owned groups, so no second orphan-chunk scan is needed."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         parsed = MagicMock()
@@ -386,7 +382,9 @@ class TestNoteIndexerIndexAll:
             await indexer.index_all(force=True)
 
         mock_storage.delete_points.assert_not_called()
-        mock_storage.scroll_points.assert_not_called()
+        mock_storage.scroll_points.assert_awaited_once_with(
+            indexer.collection_name, payload_fields=["type", "note_id"], max_results=0
+        )
 
 
 class TestNoteIndexerDeleteOrphanChunks:

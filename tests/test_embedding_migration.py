@@ -10,6 +10,7 @@ import pytest
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointStruct, SparseVector
 from vector_core import EmbeddingClient, QdrantStorage, generate_point_id
+from vector_core.embeddings.client import CircuitBreakerOpenError
 from vector_core.embeddings.global_vocab import GlobalVocabulary
 from vector_core.embeddings.identity import EmbeddingIdentity
 from vector_core.facts import FactStore
@@ -268,6 +269,59 @@ async def test_external_edit_rebuilds_whole_group_without_stale_chunks(corpus):
     result = await points(indexer, generation.physical_name)
     assert result[generate_point_id(f"note:{note.id}")].payload["note_hash"]
     assert not result[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
+
+
+async def test_forced_reindex_preserves_foreign_note_root(corpus, tmp_path):
+    indexer, _ = corpus
+    other_store = NoteStore(tmp_path / "other-notes")
+    foreign_note = other_store.create("Foreign", "Foreign source body")
+    other = NoteIndexer(other_store, indexer.storage, indexer.embedder, indexer.global_vocab)
+    other._collection_name = indexer.logical_collection_name
+    await other._index_note(parse_note(foreign_note.content), None)
+    generation = await ensure_notes_collection(indexer)
+    before = await points(indexer, generation.physical_name)
+    foreign_ids = {
+        point_id
+        for point_id, point in before.items()
+        if point.payload.get("note_id") == str(foreign_note.id)
+    }
+    assert len(foreign_ids) == 2
+    assert (await indexer.index_all(force=True)).index_healthy
+    after = await points(indexer, generation.physical_name)
+    assert all(after[point_id] == before[point_id] for point_id in foreign_ids)
+
+
+@pytest.mark.parametrize("query", ["Original", ""])
+async def test_identity_outage_uses_retained_generation_without_dense_query(corpus, query):
+    indexer, _ = corpus
+    generation = await ensure_notes_collection(indexer)
+    indexer.embedder.resolve_identity.side_effect = CircuitBreakerOpenError("isolated", 60)
+    engine = NoteSearchEngine(
+        indexer.note_store, indexer.storage, indexer.embedder, indexer.global_vocab
+    )
+    client = await indexer.storage.get_client()
+    client.query_points = AsyncMock(wraps=client.query_points)
+    await engine.search(query)
+    indexer.embedder.embed_single_cached.assert_not_awaited()
+    if query:
+        assert client.query_points.await_args.args[0] == generation.physical_name
+        assert client.query_points.await_args.kwargs["using"] == "sparse"
+        assert "prefetch" not in client.query_points.await_args.kwargs
+    assert (
+        await active_embedding_collection(indexer.storage, indexer.logical_collection_name)
+        == generation.physical_name
+    )
+
+
+async def test_migration_failure_does_not_fall_back_to_retained_reads(corpus):
+    indexer, _ = corpus
+    indexer.embedder.resolve_identity.side_effect = EmbeddingMigrationError("invalid identity")
+    engine = NoteSearchEngine(
+        indexer.note_store, indexer.storage, indexer.embedder, indexer.global_vocab
+    )
+    with pytest.raises(EmbeddingMigrationError, match="invalid identity"):
+        await engine.search("Original")
+    indexer.embedder.embed_single_cached.assert_not_awaited()
 
 
 async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):

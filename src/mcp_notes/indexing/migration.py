@@ -43,7 +43,7 @@ class NotesMigration:
             self._notes = self._snapshot()
         return self._notes
 
-    def _owns_note(self, note_id: UUID) -> bool:
+    def owns_note(self, note_id: UUID) -> bool:
         path = self.indexer.note_store.get_note_path(note_id)
         root = self.indexer.note_store.notes_dir
         if path is None or not path.is_relative_to(root):
@@ -62,7 +62,7 @@ class NotesMigration:
             note_id = UUID(payload["note_id"])
             # Shared collections can contain notes owned by another directory.
             # Absence from this store is not evidence that those notes were deleted.
-            if not self._owns_note(note_id):
+            if not self.owns_note(note_id):
                 return await resolve_shared_embedding_text(payload)
             source = self._source_notes().get(note_id)
             if source is None or (
@@ -124,7 +124,7 @@ class NotesMigration:
             if payload.get("type") not in {"note", "chunk"}:
                 continue
             note_id = UUID(payload["note_id"])
-            if not self._owns_note(note_id):
+            if not self.owns_note(note_id):
                 continue
             (summaries if payload["type"] == "note" else chunks).add(note_id)
             await self.resolve_text(payload)

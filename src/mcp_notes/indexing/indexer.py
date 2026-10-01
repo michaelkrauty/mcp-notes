@@ -29,6 +29,7 @@ from vector_core.storage.embedding_migration import (
 )
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
+from mcp_notes.indexing.migration import NotesMigration
 from mcp_notes.models import IndexStatus
 from mcp_notes.settings import settings
 from mcp_notes.storage.filesystem import NoteStore
@@ -180,14 +181,20 @@ class NoteIndexer:
             indexed = await self._get_indexed_hashes()
         else:
             indexed = {}
-            # Clear only this subsystem's points. Notes, chunks, glossary
-            # entries, and facts share one Qdrant collection, so deleting and
-            # recreating the whole collection would destroy the glossary and fact
-            # points (the glossary has no notes-side rebuild path). The collection
-            # is already ensured above; scope the clear to note/chunk points,
-            # mirroring FactIndexer._delete_all_fact_points.
-            await self.storage.delete_by_filter(self.collection_name, "type", "note")
-            await self.storage.delete_by_filter(self.collection_name, "type", "chunk")
+            # Shared collections can contain notes from other source roots.
+            # Clear only groups whose ownership is known to this source store.
+            ownership = NotesMigration(self)
+            payloads = await self.storage.scroll_points(
+                self.collection_name, payload_fields=["type", "note_id"], max_results=0
+            )
+            owned = {
+                UUID(payload["note_id"])
+                for payload in payloads
+                if payload.get("type") in {"note", "chunk"}
+                and ownership.owns_note(UUID(payload["note_id"]))
+            }
+            for note_id in owned:
+                await self._delete_note_points(note_id)
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)
@@ -231,7 +238,7 @@ class NoteIndexer:
                     # Incremental re-index can shrink a note; upsert replaces
                     # same-ID chunks but cannot remove the chunks left over from a
                     # previous, larger version. Prune them. In force mode the
-                    # collection was just recreated, so no orphans are possible.
+                    # owned groups were cleared, so no orphans are possible.
                     await self._delete_orphan_chunks(parsed.id, new_chunk_count)
                 indexed_count += 1
             except Exception as e:
