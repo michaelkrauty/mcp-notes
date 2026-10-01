@@ -14,6 +14,8 @@ import warnings
 
 from pydantic.json_schema import PydanticJsonSchemaWarning
 
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
+
 # Suppress warning for UNSET sentinel (intentionally non-JSON-serializable)
 warnings.filterwarnings(
     "ignore",
@@ -43,9 +45,7 @@ def _require_text(value: str, field: str) -> dict | None:
     GlossaryToolHelper), so the store-facing validation has to live here.
     """
     if not isinstance(value, str) or not value.strip():
-        return error_response(
-            ErrorCode.INVALID_INPUT, f"{field} must be a non-empty string"
-        )
+        return error_response(ErrorCode.INVALID_INPUT, f"{field} must be a non-empty string")
     return None
 
 
@@ -60,14 +60,10 @@ def _require_alias_texts(aliases: list[str]) -> dict | None:
     seen: set[str] = set()
     for alias in aliases:
         if not isinstance(alias, str) or not alias.strip():
-            return error_response(
-                ErrorCode.INVALID_INPUT, "aliases must not contain empty strings"
-            )
+            return error_response(ErrorCode.INVALID_INPUT, "aliases must not contain empty strings")
         normalized = alias.strip().lower()
         if normalized in seen:
-            return error_response(
-                ErrorCode.INVALID_INPUT, f"duplicate alias: {alias.strip()}"
-            )
+            return error_response(ErrorCode.INVALID_INPUT, f"duplicate alias: {alias.strip()}")
         seen.add(normalized)
     return None
 
@@ -96,6 +92,7 @@ def _validate_update_inputs(
 
 
 @mcp.tool()
+@collection_mutation
 async def add_glossary_entry(
     term: str,
     expansion: str,
@@ -136,6 +133,7 @@ async def add_glossary_entry(
     store = get_glossary_store()
 
     try:
+        await prepare_collection_mutation()
         entry = store.create(
             term=term,
             expansion=expansion,
@@ -234,6 +232,7 @@ async def list_glossary(
 
 
 @mcp.tool()
+@collection_mutation
 async def update_glossary_entry(
     term_or_id: str,
     term: str | None = None,
@@ -286,6 +285,7 @@ async def update_glossary_entry(
                 return error_response(ErrorCode.DUPLICATE, f"Term '{alias}' already exists")
 
     try:
+        await prepare_collection_mutation()
         updated = store.update(
             entry_id=entry.id,
             term=term,
@@ -308,8 +308,7 @@ async def update_glossary_entry(
             sources_marked = integrity.mark_glossary_modified(updated.id)
             if sources_marked > 0:
                 logger.info(
-                    f"Marked {sources_marked} fact sources as modified "
-                    f"for glossary {updated.id}"
+                    f"Marked {sources_marked} fact sources as modified for glossary {updated.id}"
                 )
         except Exception as e:
             logger.warning(f"Failed to mark fact sources as modified: {e}")
@@ -323,6 +322,7 @@ async def update_glossary_entry(
 
 
 @mcp.tool()
+@collection_mutation
 async def delete_glossary_entry(term_or_id: str) -> dict:
     """
     Delete a glossary entry by term or UUID.
@@ -345,6 +345,7 @@ async def delete_glossary_entry(term_or_id: str) -> dict:
     entry_id = entry.id
 
     # Delete
+    await prepare_collection_mutation()
     store.delete(entry_id)
 
     # Remove from index

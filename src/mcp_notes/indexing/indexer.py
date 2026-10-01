@@ -1,7 +1,11 @@
 """Note indexer using vector-core."""
 
+import asyncio
 import hashlib
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -19,6 +23,10 @@ from vector_core import (
     generate_point_id,
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
+from vector_core.storage.embedding_migration import (
+    CollectionGeneration,
+    embedding_collection_lock,
+)
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.models import IndexStatus
@@ -63,6 +71,9 @@ class NoteIndexer:
         self.embedder = embedder or EmbeddingClient()
         self._global_vocab = global_vocab  # Use singleton if None
         self._collection_name: str | None = None
+        self._operation_generation: ContextVar[tuple[object, CollectionGeneration] | None] = (
+            ContextVar("notes_collection_generation", default=None)
+        )
 
     @property
     def global_vocab(self) -> GlobalVocabulary:
@@ -88,15 +99,45 @@ class NoteIndexer:
 
     @property
     def collection_name(self) -> str:
+        """Get the physical target captured by the current operation."""
+        binding = self._operation_generation.get()
+        if binding is not None and binding[0] is asyncio.current_task():
+            return binding[1].physical_name
+        return self.logical_collection_name
+
+    @property
+    def logical_collection_name(self) -> str:
         """Get collection name based on notes directory."""
         if self._collection_name is None:
-            self._collection_name = generate_collection_name(
+            self._collection_name = settings.collection_name or generate_collection_name(
                 str(self.note_store.base_dir),
                 prefix=settings.collection_prefix,
             )
         return self._collection_name
 
+    @asynccontextmanager
+    async def collection_operation(self) -> AsyncIterator[CollectionGeneration]:
+        """Hold the migration lock and pin one physical target for a mutation."""
+        from mcp_notes.indexing.migration import ensure_notes_collection  # noqa: PLC0415
+
+        binding = self._operation_generation.get()
+        if binding is not None and binding[0] is asyncio.current_task():
+            yield binding[1]
+            return
+        async with embedding_collection_lock(self.storage, self.logical_collection_name):
+            generation = await ensure_notes_collection(self, lock_held=True)
+            token = self._operation_generation.set((asyncio.current_task(), generation))
+            try:
+                yield generation
+            finally:
+                self._operation_generation.reset(token)
+
     async def ensure_collection(self) -> None:
+        """Ensure a compatible generation and its note payload indexes."""
+        async with self.collection_operation():
+            await self._ensure_payload_indexes()
+
+    async def _ensure_payload_indexes(self) -> None:
         """Ensure Qdrant collection exists with payload indexes."""
         if not await self.storage.collection_exists(self.collection_name):
             await self.storage.create_collection(self.collection_name)
@@ -114,6 +155,11 @@ class NoteIndexer:
         )
 
     async def index_all(self, force: bool = False) -> IndexStatus:
+        """Index notes into a compatible generation under the collection lock."""
+        async with self.collection_operation():
+            return await self._index_all(force=force)
+
+    async def _index_all(self, force: bool = False) -> IndexStatus:
         """
         Index all notes using two-pass GlobalVocabulary pattern.
 
@@ -141,9 +187,7 @@ class NoteIndexer:
             # is already ensured above; scope the clear to note/chunk points,
             # mirroring FactIndexer._delete_all_fact_points.
             await self.storage.delete_by_filter(self.collection_name, "type", "note")
-            await self.storage.delete_by_filter(
-                self.collection_name, "type", "chunk"
-            )
+            await self.storage.delete_by_filter(self.collection_name, "type", "chunk")
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)
@@ -216,6 +260,11 @@ class NoteIndexer:
         )
 
     async def index_note(self, note_id: UUID) -> None:
+        """Index one note into a compatible generation."""
+        async with self.collection_operation():
+            await self._index_one_note(note_id)
+
+    async def _index_one_note(self, note_id: UUID) -> None:
         """
         Index a single note using upsert-then-delete-orphans pattern.
 
@@ -269,7 +318,8 @@ class NoteIndexer:
         Args:
             note_id: Note UUID to remove
         """
-        await self._delete_note_points(note_id)
+        async with self.collection_operation():
+            await self._delete_note_points(note_id)
 
     async def _index_note(self, parsed: ParsedNote, category: str | None) -> int:
         """Index a single parsed note with category from path.
@@ -312,6 +362,7 @@ class NoteIndexer:
                 "created": parsed.created.isoformat(),
                 "modified": parsed.modified.isoformat(),
                 "note_hash": self._hash_note(parsed, category),
+                "source_reindex_pending": False,
             },
         )
         points.append(file_point)
@@ -339,7 +390,7 @@ class NoteIndexer:
                     "section_title": chunk.section_title,
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
-                    "content": chunk.content[:settings.max_payload_content_chars],
+                    "content": chunk.content[: settings.max_payload_content_chars],
                     "tags": parsed.tags,
                     "category": category,  # From path, not frontmatter
                     "created": parsed.created.isoformat(),
@@ -373,7 +424,9 @@ class NoteIndexer:
         # Generate sparse vector using GlobalVocabulary
         sparse = self.global_vocab.vectorize_document(content)
 
-        return create_hybrid_point_with_key(key, embedding, sparse, payload)
+        return create_hybrid_point_with_key(
+            key, embedding, sparse, {**payload, "embedding_text": content}
+        )
 
     async def _delete_note_points(self, note_id: UUID) -> None:
         """Delete all points for a note."""
@@ -441,9 +494,7 @@ class NoteIndexer:
             )
 
             return {
-                p.get("note_id", ""): p.get("note_hash", "")
-                for p in points
-                if p.get("note_id")
+                p.get("note_id", ""): p.get("note_hash", "") for p in points if p.get("note_id")
             }
         except Exception as e:
             logger.debug(f"Could not retrieve indexed hashes (collection may not exist): {e}")
@@ -455,6 +506,11 @@ class NoteIndexer:
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     async def get_status(self) -> IndexStatus:
+        """Report status for the compatible physical generation."""
+        async with self.collection_operation():
+            return await self._get_status()
+
+    async def _get_status(self) -> IndexStatus:
         """Get current index status."""
         total_notes = self.note_store.count()
 

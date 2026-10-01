@@ -18,7 +18,7 @@ import logging
 from datetime import date
 from uuid import UUID
 
-from vector_core import UNSET, UnsetType, validate_limit
+from vector_core import UNSET, UnsetType, is_set, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_notes.app import mcp
@@ -26,11 +26,32 @@ from mcp_notes.facts import (
     DuplicateFactError,
     FactNotFoundError,
     FactSource,
+    FactStore,
     SourceType,
 )
 from mcp_notes.singletons import get_fact_indexer, get_fact_store, get_search
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
 
 logger = logging.getLogger(__name__)
+
+
+def _preflight_update_dates(
+    store: FactStore,
+    fact_id: UUID,
+    valid_from: date | None | UnsetType,
+    valid_to: date | None | UnsetType,
+) -> None:
+    """Reject an invalid effective range before embedding or collection access."""
+    if not is_set(valid_from) and not is_set(valid_to):
+        return
+    existing = store.read(fact_id)
+    error = _validate_date_range(
+        valid_from if is_set(valid_from) else existing.valid_from,
+        valid_to if is_set(valid_to) else existing.valid_to,
+    )
+    if error:
+        raise ValueError(error)
+
 
 # Input validation limits (DoS protection)
 MAX_ENTITY_NAME_LENGTH = 1000  # Maximum characters in entity name
@@ -56,7 +77,7 @@ def _validate_entity_name(name: str, field: str = "entity") -> str | dict:
     if len(name) > MAX_ENTITY_NAME_LENGTH:
         return error_response(
             ErrorCode.INVALID_INPUT,
-            f"{field} exceeds maximum length of {MAX_ENTITY_NAME_LENGTH} characters"
+            f"{field} exceeds maximum length of {MAX_ENTITY_NAME_LENGTH} characters",
         )
     return name.strip()
 
@@ -93,9 +114,7 @@ def _validate_date_range(valid_from: date | None, valid_to: date | None) -> str 
     return None
 
 
-def _parse_optional_iso_date(
-    value: object, field: str
-) -> tuple[date | None, str | None]:
+def _parse_optional_iso_date(value: object, field: str) -> tuple[date | None, str | None]:
     """Parse an optional ISO date (YYYY-MM-DD) from a tool argument.
 
     Returns ``(parsed_date, None)`` on success, ``(None, None)`` when the field
@@ -126,6 +145,7 @@ def _parse_optional_iso_date(
 
 
 @mcp.tool()
+@collection_mutation
 async def add_fact(
     subject: str,
     predicate: str,
@@ -203,16 +223,13 @@ async def add_fact(
             return error_response(
                 ErrorCode.INVALID_INPUT,
                 f"Invalid source_type: {source_type}. "
-                "Must be one of: note, document, glossary, manual"
+                "Must be one of: note, document, glossary, manual",
             )
 
         try:
             source_id_uuid = UUID(source_id) if source_id else None
         except ValueError:
-            return error_response(
-                ErrorCode.INVALID_INPUT,
-                f"Invalid source_id UUID: {source_id}"
-            )
+            return error_response(ErrorCode.INVALID_INPUT, f"Invalid source_id UUID: {source_id}")
 
         source = FactSource(
             source_type=src_type,
@@ -223,6 +240,7 @@ async def add_fact(
         )
 
     try:
+        await prepare_collection_mutation()
         fact = store.create(
             subject=subject,
             predicate=predicate,
@@ -246,7 +264,7 @@ async def add_fact(
     except DuplicateFactError as e:
         return error_response(
             ErrorCode.DUPLICATE,
-            f"Fact already exists with same subject/predicate/object (id={e.existing_id})"
+            f"Fact already exists with same subject/predicate/object (id={e.existing_id})",
         )
 
 
@@ -254,6 +272,7 @@ async def add_fact(
 # Inherently a long per-item validator (already over the branch limit); the
 # added confidence check tips it past the statement limit too. noqa the new
 # code rather than carve up well-tested batch logic for a small fix.
+@collection_mutation
 async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
     """
     Add multiple facts, committing each newly created fact independently.
@@ -276,10 +295,12 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
     for i, fact_data in enumerate(facts):
         # Validate required fields
         if not all(k in fact_data for k in ("subject", "predicate", "object")):
-            errors.append({
-                "index": i,
-                "error": "Missing required field(s): subject, predicate, object",
-            })
+            errors.append(
+                {
+                    "index": i,
+                    "error": "Missing required field(s): subject, predicate, object",
+                }
+            )
             continue
 
         # Validate entity names and types (effective values, so explicit blanks
@@ -335,10 +356,12 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
             try:
                 src_type = SourceType(fact_data["source_type"])
             except ValueError:
-                errors.append({
-                    "index": i,
-                    "error": f"Invalid source_type: {fact_data['source_type']}",
-                })
+                errors.append(
+                    {
+                        "index": i,
+                        "error": f"Invalid source_type: {fact_data['source_type']}",
+                    }
+                )
                 continue
 
             try:
@@ -346,10 +369,12 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
                     UUID(fact_data["source_id"]) if fact_data.get("source_id") else None
                 )
             except ValueError:
-                errors.append({
-                    "index": i,
-                    "error": f"Invalid source_id UUID: {fact_data['source_id']}",
-                })
+                errors.append(
+                    {
+                        "index": i,
+                        "error": f"Invalid source_id UUID: {fact_data['source_id']}",
+                    }
+                )
                 continue
 
             source = FactSource(
@@ -361,6 +386,7 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
             )
 
         try:
+            await prepare_collection_mutation()
             store.create(
                 subject=fact_data["subject"],
                 predicate=fact_data["predicate"],
@@ -396,6 +422,7 @@ async def add_facts_batch(facts: list[dict]) -> dict:  # noqa: PLR0912, PLR0915
 
 
 @mcp.tool()
+@collection_mutation
 async def update_fact(
     fact_id: str,
     context: str | None = None,
@@ -466,6 +493,8 @@ async def update_fact(
 
     try:
         # Use UNSET as sentinel for "not provided" - update() handles this
+        _preflight_update_dates(store, uuid, parsed_valid_from, parsed_valid_to)
+        await prepare_collection_mutation()
         fact = store.update(
             fact_id=uuid,
             context=context if context is not None else UNSET,
@@ -494,6 +523,7 @@ async def update_fact(
 
 
 @mcp.tool()
+@collection_mutation
 async def delete_fact(fact_id: str) -> dict:
     """
     Delete a fact and its sources.
@@ -511,6 +541,7 @@ async def delete_fact(fact_id: str) -> dict:
     except ValueError:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {fact_id}")
 
+    await prepare_collection_mutation()
     deleted = store.delete(uuid)
     if deleted:
         # Remove the fact's point from the semantic index too: search_facts reads
@@ -564,10 +595,12 @@ async def query_facts(
         try:
             parsed_valid_at = date_type.fromisoformat(valid_at)
         except ValueError:
-            return [error_response(
-                ErrorCode.INVALID_INPUT,
-                f"Invalid valid_at date format: {valid_at}. Use YYYY-MM-DD",
-            )]
+            return [
+                error_response(
+                    ErrorCode.INVALID_INPUT,
+                    f"Invalid valid_at date format: {valid_at}. Use YYYY-MM-DD",
+                )
+            ]
 
     limit = validate_limit(limit, 50)
 
@@ -686,14 +719,16 @@ async def search_facts(
     # Convert SearchResult to fact-friendly format
     output = []
     for r in results:
-        output.append({
-            "fact_id": str(r.note.id),
-            "title": r.note.title,
-            "excerpt": r.note.excerpt,
-            "score": r.score,
-            "types": r.note.tags,  # subject_type and object_type
-            "highlights": r.highlights,
-        })
+        output.append(
+            {
+                "fact_id": str(r.note.id),
+                "title": r.note.title,
+                "excerpt": r.note.excerpt,
+                "score": r.score,
+                "types": r.note.tags,  # subject_type and object_type
+                "highlights": r.highlights,
+            }
+        )
 
     return output
 
@@ -790,21 +825,23 @@ async def find_connections(
             entities.append(far)
             current = far
 
-        result.append({
-            "path": [
-                {
-                    "id": str(f.id),
-                    "subject": f.subject,
-                    "subject_type": f.subject_type,
-                    "predicate": f.predicate,
-                    "object": f.object_value,
-                    "object_type": f.object_type,
-                }
-                for f in path
-            ],
-            "entities": entities,
-            "length": len(path),
-        })
+        result.append(
+            {
+                "path": [
+                    {
+                        "id": str(f.id),
+                        "subject": f.subject,
+                        "subject_type": f.subject_type,
+                        "predicate": f.predicate,
+                        "object": f.object_value,
+                        "object_type": f.object_type,
+                    }
+                    for f in path
+                ],
+                "entities": entities,
+                "length": len(path),
+            }
+        )
 
     return result
 

@@ -1,6 +1,6 @@
 [project]
 name = "mcp-notes"
-version = "1.1.2"
+version = "1.2.0"
 description = "MCP server for semantic note management with vector search"
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,6 +21,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/michaelkrauty/mcp-notes"
 Repository = "https://github.com/michaelkrauty/mcp-notes"
+
+[project.optional-dependencies]
+tokenizer = ["vector-core[tokenizer]"]
 
 # A dependency group rather than an extra: `uv sync` installs it by default,
 # so `uv run pytest` finds pytest in the project environment. As an extra it

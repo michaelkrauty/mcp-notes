@@ -27,7 +27,8 @@ from vector_core import (
 from vector_core.embeddings.client import CircuitBreakerOpenError
 from vector_core.embeddings.global_vocab import GlobalVocabulary
 
-from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID
+from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
+from mcp_notes.indexing.migration import ensure_notes_collection
 from mcp_notes.models import SearchResult
 from mcp_notes.search.converters import convert_payload
 from mcp_notes.search.filters import (
@@ -97,7 +98,7 @@ class NoteSearchEngine:
     def collection_name(self) -> str:
         """Get collection name."""
         if self._collection_name is None:
-            self._collection_name = generate_collection_name(
+            self._collection_name = settings.collection_name or generate_collection_name(
                 str(self.note_store.base_dir),
                 prefix=settings.collection_prefix,
             )
@@ -109,6 +110,18 @@ class NoteSearchEngine:
             return True
         logger.warning("GlobalVocabulary not registered for notes, sparse search may be limited")
         return False
+
+    async def _ready_collection(self) -> str:
+        """Resolve once before embedding, retaining a physical query target."""
+        await self._ensure_global_vocab()
+        indexer = NoteIndexer(
+            note_store=self.note_store,
+            storage=self.storage,
+            embedder=self.embedder,
+            global_vocab=self.global_vocab,
+        )
+        generation = await ensure_notes_collection(indexer)
+        return generation.physical_name
 
     async def search(
         self,
@@ -139,7 +152,7 @@ class NoteSearchEngine:
         Returns:
             List of SearchResult objects
         """
-        await self._ensure_global_vocab()
+        collection = await self._ready_collection()
         limit = limit or settings.search_limit_default
         self._ensure_vocabulary_registered()
 
@@ -160,38 +173,28 @@ class NoteSearchEngine:
 
         # If no semantic query, fall back to listing
         if not filters.query.strip():
-            return await self._filter_only_search(filters, mode, limit, type_filter, domain)
+            return await self._filter_only_search(
+                filters, mode, limit, type_filter, domain, collection=collection
+            )
 
         # Build Qdrant filters first (shared between hybrid and sparse-only)
         qdrant_filters = filters_to_qdrant(filters)
 
         # Add type filter - type_filter takes precedence over mode
         if type_filter == "glossary":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="glossary"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="glossary")))
         elif type_filter == "fact":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="fact"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="fact")))
         elif type_filter == "note":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="note"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
         elif type_filter == "chunk":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="chunk"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="chunk")))
         elif type_filter is None or type_filter == "all":
             # Use mode for notes/chunks filtering
             if mode == "note":
-                qdrant_filters.append(
-                    FieldCondition(key="type", match=MatchValue(value="note"))
-                )
+                qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
             elif mode == "chunk":
-                qdrant_filters.append(
-                    FieldCondition(key="type", match=MatchValue(value="chunk"))
-                )
+                qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="chunk")))
             elif type_filter is None:  # mode == "both", the search_notes default
                 # Restrict to note + chunk. Glossary entries and facts live in
                 # the same collection, so without this they leak into note
@@ -206,9 +209,7 @@ class NoteSearchEngine:
 
         # Add domain filter for glossary
         if domain:
-            qdrant_filters.append(
-                FieldCondition(key="domain", match=MatchValue(value=domain))
-            )
+            qdrant_filters.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
 
         query_filter = Filter(must=qdrant_filters) if qdrant_filters else None
 
@@ -232,11 +233,11 @@ class NoteSearchEngine:
 
         try:
             # Get dense embeddings for hybrid search
-            dense_vector = await self.embedder.embed_single_cached(filters.query)
+            dense_vector = await self.embedder.embed_single_cached(filters.query, role="query")
 
             # Perform hybrid search with RRF fusion
             points = await client.query_points(
-                self.collection_name,
+                collection,
                 prefetch=[
                     Prefetch(
                         query=QdrantSparseVector(
@@ -265,7 +266,7 @@ class NoteSearchEngine:
             degraded = True
 
             points = await client.query_points(
-                self.collection_name,
+                collection,
                 query=QdrantSparseVector(
                     indices=sparse_vector.indices,
                     values=sparse_vector.values,
@@ -312,45 +313,36 @@ class NoteSearchEngine:
         limit: int,
         type_filter: Literal["note", "chunk", "glossary", "fact", "all"] | None = None,
         domain: str | None = None,
+        *,
+        collection: str | None = None,
     ) -> list[SearchResult]:
         """Search using filters only (no semantic query)."""
+        collection = collection or await self._ready_collection()
         qdrant_filters = filters_to_qdrant(filters)
 
         # Add type filter
         if type_filter == "glossary":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="glossary"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="glossary")))
         elif type_filter == "fact":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="fact"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="fact")))
         elif type_filter == "note":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="note"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
         elif type_filter == "chunk":
-            qdrant_filters.append(
-                FieldCondition(key="type", match=MatchValue(value="chunk"))
-            )
+            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="chunk")))
         elif type_filter is None or type_filter == "all":
             # Default to note-level for filter-only
             if mode in ("note", "both"):
-                qdrant_filters.append(
-                    FieldCondition(key="type", match=MatchValue(value="note"))
-                )
+                qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
 
         # Add domain filter for glossary
         if domain:
-            qdrant_filters.append(
-                FieldCondition(key="domain", match=MatchValue(value=domain))
-            )
+            qdrant_filters.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
 
         # Fetch extra results to account for post-filtering
         fetch_limit = max(limit * 3, limit + 20)
 
         points = await self.storage.scroll_points(
-            self.collection_name,
+            collection,
             filter_conditions=qdrant_filters if qdrant_filters else None,
             limit=fetch_limit,
         )
@@ -441,6 +433,7 @@ class NoteSearchEngine:
         Returns:
             List of similar notes (excluding the source)
         """
+        collection = await self._ready_collection()
         # Get the source note's embedding
         client = await self.storage.get_client()
 
@@ -450,7 +443,7 @@ class NoteSearchEngine:
 
         try:
             points = await client.retrieve(
-                self.collection_name,
+                collection,
                 ids=[point_id],
                 with_vectors=True,
             )
@@ -470,7 +463,7 @@ class NoteSearchEngine:
 
         # Search for similar notes
         response = await client.query_points(
-            self.collection_name,
+            collection,
             query=dense_vector,
             using="dense",
             limit=limit + 1,  # +1 to exclude self

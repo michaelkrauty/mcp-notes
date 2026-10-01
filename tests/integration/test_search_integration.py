@@ -7,7 +7,6 @@ import pytest
 from ..conftest import requires_full_stack
 
 
-
 @requires_full_stack
 class TestHybridSearch:
     """Integration tests for hybrid search functionality."""
@@ -138,6 +137,7 @@ class TestHybridSearch:
             assert "highlights" in r
 
 
+@requires_full_stack
 class TestFilterOnlySearch:
     """Tests for filter-only search (no semantic query)."""
 
@@ -177,6 +177,7 @@ class TestFilterOnlySearch:
                 assert r.note.category.startswith("work")
 
 
+@requires_full_stack
 class TestFindSimilar:
     """Tests for find_similar_notes functionality."""
 

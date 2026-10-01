@@ -1,5 +1,6 @@
 """Tests for note indexer."""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -12,15 +13,27 @@ from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.models import IndexStatus
 
 
+@pytest.fixture(autouse=True)
+def ready_generation(monkeypatch):
+    """Indexing unit tests isolate writes from the migration coordinator."""
+
+    @asynccontextmanager
+    async def collection_operation(indexer):
+        yield
+
+    monkeypatch.setattr(NoteIndexer, "collection_operation", collection_operation)
+
+
 class TestNoteIndexerInit:
     """Tests for NoteIndexer initialization."""
 
     def test_init_default(self):
         """Creates default components if not provided."""
-        with patch("mcp_notes.indexing.indexer.NoteStore") as mock_store, \
-             patch("mcp_notes.indexing.indexer.QdrantStorage") as mock_storage, \
-             patch("mcp_notes.indexing.indexer.EmbeddingClient") as mock_embedder:
-
+        with (
+            patch("mcp_notes.indexing.indexer.NoteStore") as mock_store,
+            patch("mcp_notes.indexing.indexer.QdrantStorage") as mock_storage,
+            patch("mcp_notes.indexing.indexer.EmbeddingClient") as mock_embedder,
+        ):
             NoteIndexer()
 
             mock_store.assert_called_once()
@@ -238,10 +251,7 @@ class TestNoteIndexerIndexAll:
         # Must NOT nuke the shared collection (would destroy glossary + facts).
         mock_storage.delete_collection.assert_not_called()
         # Clears only the note and chunk points.
-        cleared = {
-            (c.args[1], c.args[2])
-            for c in mock_storage.delete_by_filter.call_args_list
-        }
+        cleared = {(c.args[1], c.args[2]) for c in mock_storage.delete_by_filter.call_args_list}
         assert ("type", "note") in cleared
         assert ("type", "chunk") in cleared
 
@@ -505,8 +515,6 @@ class TestNoteIndexerGetIndexedHashes:
         assert hashes == {}
 
 
-
-
 class TestNoteIndexerGetStatus:
     """Tests for get_status method."""
 
@@ -608,7 +616,9 @@ class TestNoteIndexerCreatePoint:
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_global_vocab = MagicMock()
-        mock_global_vocab.vectorize_document.return_value = MagicMock(indices=[1, 2], values=[0.5, 0.5])
+        mock_global_vocab.vectorize_document.return_value = MagicMock(
+            indices=[1, 2], values=[0.5, 0.5]
+        )
 
         indexer = NoteIndexer(
             note_store=mock_store,
@@ -630,7 +640,7 @@ class TestNoteIndexerCreatePoint:
         assert point is not None
         assert "dense" in point.vector
         assert "sparse" in point.vector
-        assert point.payload == {"type": "chunk"}
+        assert point.payload == {"type": "chunk", "embedding_text": "test content"}
 
     def test_create_point_without_chunk_index(self):
         """Creates point without chunk index in ID."""

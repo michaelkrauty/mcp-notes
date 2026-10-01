@@ -11,6 +11,7 @@ from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.models import CategoryInfo, CategoryTree
 from mcp_notes.singletons import get_git, get_indexer, get_store
 from mcp_notes.storage.slugify import slugify_category_path
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
 
 
 @mcp.tool()
@@ -41,6 +42,7 @@ async def list_categories() -> dict:
 
 
 @mcp.tool()
+@collection_mutation
 async def move_category(
     old_path: str,
     new_path: str,
@@ -81,6 +83,7 @@ async def move_category(
                 new_category = new_norm + summary.category[len(old_norm) :]
 
                 old_note_path = store.get_note_path(summary.id)
+                await prepare_collection_mutation()
                 store.update(
                     note_id=summary.id,
                     category=new_category,

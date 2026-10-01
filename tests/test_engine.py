@@ -8,6 +8,16 @@ import pytest
 from mcp_notes.search.engine import NoteSearchEngine
 
 
+@pytest.fixture(autouse=True)
+def ready_generation(monkeypatch):
+    """Search unit tests exercise queries against an already-ready generation."""
+
+    async def ready(engine):
+        return engine.collection_name
+
+    monkeypatch.setattr(NoteSearchEngine, "_ready_collection", ready)
+
+
 class TestNoteSearchEngineInit:
     """Tests for search engine initialization."""
 
@@ -135,10 +145,12 @@ class TestSearch:
 
         mock_global_vocab = MagicMock()
         mock_global_vocab.get_codebase_doc_count.return_value = 10
-        mock_global_vocab.vectorize_query = MagicMock(return_value=MagicMock(
-            indices=[0, 1, 2],
-            values=[0.5, 0.3, 0.2],
-        ))
+        mock_global_vocab.vectorize_query = MagicMock(
+            return_value=MagicMock(
+                indices=[0, 1, 2],
+                values=[0.5, 0.3, 0.2],
+            )
+        )
 
         engine = NoteSearchEngine(
             note_store=mock_store,
@@ -174,6 +186,9 @@ class TestSearch:
 
         results = await mock_engine.search("test query")
 
+        mock_engine.embedder.embed_single_cached.assert_awaited_once_with(
+            "test query", role="query"
+        )
         assert len(results) == 1
         assert results[0].note.id == UUID(note_id)
         assert results[0].note.title == "Test Note"
@@ -605,10 +620,12 @@ class TestSearchEdgeCases:
 
         mock_global_vocab = MagicMock()
         mock_global_vocab.get_codebase_doc_count.return_value = 10
-        mock_global_vocab.vectorize_query = MagicMock(return_value=MagicMock(
-            indices=[0, 1],
-            values=[0.5, 0.3],
-        ))
+        mock_global_vocab.vectorize_query = MagicMock(
+            return_value=MagicMock(
+                indices=[0, 1],
+                values=[0.5, 0.3],
+            )
+        )
 
         engine = NoteSearchEngine(
             note_store=mock_store,

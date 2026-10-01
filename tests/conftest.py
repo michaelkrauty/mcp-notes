@@ -55,6 +55,9 @@ os.environ.setdefault(
 )
 
 import asyncio  # noqa: E402 - must follow the environment default above
+from contextlib import asynccontextmanager  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import AsyncMock  # noqa: E402
 
 import pytest  # noqa: E402 - must follow the environment default above
 
@@ -73,10 +76,7 @@ def qdrant_and_embeddings_available() -> bool:
     from mcp_notes.settings import settings
 
     try:
-        if (
-            httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0).status_code
-            != 200
-        ):
+        if httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0).status_code != 200:
             return False
 
         response = httpx.post(
@@ -101,6 +101,21 @@ requires_full_stack = pytest.mark.skipif(
 
 
 @pytest.fixture
+def mock_collection_mutation(monkeypatch):
+    """Stub the writer boundary explicitly for mocked tool tests only."""
+    from mcp_notes.tools import mutation  # noqa: PLC0415
+
+    @asynccontextmanager
+    async def collection_operation():
+        yield
+
+    indexer = SimpleNamespace(collection_operation=collection_operation)
+    getter = AsyncMock(return_value=indexer)
+    monkeypatch.setattr(mutation, "get_indexer", getter)
+    return getter
+
+
+@pytest.fixture
 def tmp_notes_dir(tmp_path, monkeypatch):
     """Create temporary notes directory and configure settings."""
     notes_dir = tmp_path / "notes"
@@ -112,6 +127,7 @@ def tmp_notes_dir(tmp_path, monkeypatch):
     # Reset GlobalVocabulary singleton from vector-core (must be done BEFORE mcp-notes singletons)
     # Also unregister "notes" codebase to clear stale data from shared DB
     from vector_core.embeddings.global_vocab import GlobalVocabulary
+
     GlobalVocabulary.reset_instance()
     # Get fresh instance and clear any stale "notes" registration from shared DB
     vocab = GlobalVocabulary.get_instance()
@@ -133,16 +149,19 @@ def tmp_notes_dir(tmp_path, monkeypatch):
 
     # Also reset settings
     from mcp_notes.settings import settings
+
     original_notes_dir = settings.dir
     settings.dir = notes_dir
 
     # Create temp glossary database (to isolate from shared DB)
     from vector_core.glossary import GlossaryStore
+
     glossary_db_path = tmp_path / "glossary.db"
     temp_glossary_store = GlossaryStore(db_path=glossary_db_path)
 
     # Create temp fact database (to isolate from shared DB)
     from vector_core.facts import FactStore
+
     fact_db_path = tmp_path / "facts.db"
     temp_fact_store = FactStore(db_path=fact_db_path)
 
@@ -163,6 +182,7 @@ def tmp_notes_dir(tmp_path, monkeypatch):
 
     # Track collection name for cleanup
     from vector_core.storage.qdrant import generate_collection_name
+
     collection_name = generate_collection_name(
         str(notes_dir),
         prefix=settings.collection_prefix,
@@ -174,6 +194,7 @@ def tmp_notes_dir(tmp_path, monkeypatch):
     # Note: This cleanup is best-effort - failures are logged but don't fail tests
     async def cleanup_collection():
         from vector_core.storage.qdrant import QdrantStorage
+
         storage = QdrantStorage()
         try:
             if await storage.collection_exists(collection_name):
@@ -192,8 +213,10 @@ def tmp_notes_dir(tmp_path, monkeypatch):
 
     def run_cleanup_sync():
         """Run cleanup in a new event loop on a separate thread."""
+
         def _run():
             asyncio.run(cleanup_collection())
+
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
         thread.join(timeout=5.0)  # Wait up to 5 seconds for cleanup

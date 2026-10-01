@@ -27,11 +27,7 @@ def _tags_in_query_points(mock_client) -> list[str]:
     flt = getattr(prefetch[0], "filter", None)
     if flt is None:
         return []
-    return [
-        cond.match.value
-        for cond in (flt.must or [])
-        if getattr(cond, "key", None) == "tags"
-    ]
+    return [cond.match.value for cond in (flt.must or []) if getattr(cond, "key", None) == "tags"]
 
 
 @pytest.fixture
@@ -64,6 +60,7 @@ def mock_engine():
         global_vocab=mock_global_vocab,
     )
     engine._mock_client = mock_client
+    engine._ready_collection = AsyncMock(return_value=engine.collection_name)
     return engine
 
 
