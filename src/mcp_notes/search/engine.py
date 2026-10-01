@@ -452,7 +452,7 @@ class NoteSearchEngine:
         Returns:
             List of similar notes (excluding the source)
         """
-        collection = await self._ready_collection()
+        collection, _ = await self._readable_collection()
         # Get the source note's embedding
         client = await self.storage.get_client()
 

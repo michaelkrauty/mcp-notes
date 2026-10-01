@@ -497,11 +497,17 @@ class NoteIndexer:
                 filter_conditions=[
                     FieldCondition(key="type", match=MatchValue(value="note")),
                 ],
-                payload_fields=["note_id", "note_hash"],
+                payload_fields=["note_id", "note_hash", "embedding_text_source"],
             )
 
             return {
-                p.get("note_id", ""): p.get("note_hash", "") for p in points if p.get("note_id")
+                p["note_id"]: (
+                    ""
+                    if p.get("embedding_text_source") == "legacy-note-metadata"
+                    else p.get("note_hash", "")
+                )
+                for p in points
+                if p.get("note_id")
             }
         except Exception as e:
             logger.debug(f"Could not retrieve indexed hashes (collection may not exist): {e}")

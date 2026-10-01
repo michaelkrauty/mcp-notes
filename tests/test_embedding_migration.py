@@ -324,6 +324,44 @@ async def test_migration_failure_does_not_fall_back_to_retained_reads(corpus):
     indexer.embedder.embed_single_cached.assert_not_awaited()
 
 
+async def test_owner_reindexes_metadata_fallback_after_foreign_first_migration(corpus, tmp_path):
+    indexer, note = corpus
+    foreign_store = NoteStore(tmp_path / "foreign-first")
+    foreign_store.ensure_directories()
+    foreign = NoteIndexer(foreign_store, indexer.storage, indexer.embedder, indexer.global_vocab)
+    foreign._collection_name = indexer.logical_collection_name
+    generation = await ensure_notes_collection(foreign)
+    summary_id = generate_point_id(f"note:{note.id}")
+    before = (await points(indexer, generation.physical_name))[summary_id].payload
+    assert before["embedding_text_source"] == "legacy-note-metadata"
+    assert "Original content" not in before["embedding_text"]
+    assert (await indexer.index_all()).index_healthy
+    after = (await points(indexer, generation.physical_name))[summary_id].payload
+    assert "Original content" in after["embedding_text"]
+    assert "embedding_text_source" not in after
+
+
+async def test_similar_lookup_uses_stored_vector_during_identity_outage(corpus):
+    indexer, note = corpus
+    generation = await ensure_notes_collection(indexer)
+    indexer.embedder.resolve_identity.side_effect = CircuitBreakerOpenError("isolated", 60)
+    engine = NoteSearchEngine(
+        indexer.note_store, indexer.storage, indexer.embedder, indexer.global_vocab
+    )
+    client = await indexer.storage.get_client()
+    client.retrieve = AsyncMock(wraps=client.retrieve)
+    client.query_points = AsyncMock(wraps=client.query_points)
+    await engine.find_similar(note.id)
+    indexer.embedder.embed_single_cached.assert_not_awaited()
+    assert client.retrieve.await_args.args[0] == generation.physical_name
+    assert client.query_points.await_args.args[0] == generation.physical_name
+    assert client.query_points.await_args.kwargs["using"] == "dense"
+    stored = (await points(indexer, generation.physical_name))[
+        generate_point_id(f"note:{note.id}")
+    ].vector["dense"]
+    assert client.query_points.await_args.kwargs["query"] == stored
+
+
 async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):
     indexer, note = corpus
     parsed = parse_note(indexer.note_store.read(note.id).content)
