@@ -28,6 +28,7 @@ class TestGenerateFactText:
         )
         # Create a minimal fact with datetime
         from datetime import UTC, datetime
+
         fact.created = datetime.now(UTC)
         fact.modified = datetime.now(UTC)
 
@@ -40,6 +41,7 @@ class TestGenerateFactText:
     def test_fact_with_types(self):
         """Generate text includes types."""
         from datetime import UTC, datetime
+
         fact = Fact(
             id=uuid4(),
             subject="Python",
@@ -63,6 +65,7 @@ class TestGenerateFactText:
     def test_fact_with_context(self):
         """Generate text includes context."""
         from datetime import UTC, datetime
+
         fact = Fact(
             id=uuid4(),
             subject="John",
@@ -276,7 +279,8 @@ class TestFactIndexerIntegration:
         await integration_indexer.delete_fact_index(fact.id)
 
         # Verify by checking indexed IDs
-        indexed = await integration_indexer._get_indexed_fact_ids()
+        generation = await integration_indexer._ensure_generation()
+        indexed = await integration_indexer._get_indexed_fact_ids(generation.physical_name)
         assert str(fact.id) not in indexed
 
     @pytest.mark.asyncio
