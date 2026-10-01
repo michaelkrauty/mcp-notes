@@ -25,14 +25,12 @@ from mcp_notes.server import (
 
 
 @pytest.fixture
-def temp_fact_store(tmp_path, monkeypatch):
+def temp_fact_store(tmp_path, monkeypatch, mock_collection_mutation):
     """Inject a temporary SQLite-backed FactStore (no Qdrant/embeddings needed)."""
     original = singletons_module._fact_store.get_if_initialized()
     store = FactStore(db_path=tmp_path / "test_facts.db")
     singletons_module._fact_store.set_instance(store)
-    monkeypatch.setattr(
-        facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock())
-    )
+    monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock()))
     yield store
     store.close()
     singletons_module._fact_store.set_instance(original)
@@ -64,48 +62,45 @@ class TestRevalidateGuard:
 class TestConfidenceBounds:
     """confidence is documented as 0.0-1.0; out-of-range values are rejected."""
 
-    async def test_add_fact_rejects_out_of_range(self, temp_fact_store):
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", confidence=1.5
-        )
+    async def test_add_fact_rejects_out_of_range(self, temp_fact_store, mock_collection_mutation):
+        result = await add_fact(subject="A", predicate="rel", object="B", confidence=1.5)
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        mock_collection_mutation.assert_not_awaited()
 
-    async def test_add_fact_rejects_negative(self, temp_fact_store):
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", confidence=-0.1
-        )
+    async def test_add_fact_rejects_negative(self, temp_fact_store, mock_collection_mutation):
+        result = await add_fact(subject="A", predicate="rel", object="B", confidence=-0.1)
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        mock_collection_mutation.assert_not_awaited()
 
     async def test_add_fact_accepts_in_range(self, temp_fact_store):
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", confidence=0.5
-        )
+        result = await add_fact(subject="A", predicate="rel", object="B", confidence=0.5)
         assert "id" in result
         assert result["confidence"] == 0.5
 
     async def test_add_fact_accepts_boundaries(self, temp_fact_store):
         # 0.0 and 1.0 are valid (inclusive bounds).
         for i, c in enumerate((0.0, 1.0)):
-            result = await add_fact(
-                subject=f"S{i}", predicate="rel", object="O", confidence=c
-            )
+            result = await add_fact(subject=f"S{i}", predicate="rel", object="O", confidence=c)
             assert result.get("confidence") == c
 
-    async def test_add_fact_rejects_none(self, temp_fact_store):
+    async def test_add_fact_rejects_none(self, temp_fact_store, mock_collection_mutation):
         # None is not "unchanged" for add_fact (the column is NOT NULL).
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", confidence=None
-        )
+        result = await add_fact(subject="A", predicate="rel", object="B", confidence=None)
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        mock_collection_mutation.assert_not_awaited()
 
-    async def test_update_fact_rejects_out_of_range(self, temp_fact_store):
+    async def test_update_fact_rejects_out_of_range(
+        self, temp_fact_store, mock_collection_mutation
+    ):
         created = await add_fact(subject="A", predicate="rel", object="B")
+        mock_collection_mutation.reset_mock()
         result = await update_fact(fact_id=created["id"], confidence=2.0)
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        mock_collection_mutation.assert_not_awaited()
 
     async def test_update_fact_none_confidence_is_allowed(self, temp_fact_store):
         created = await add_fact(subject="A", predicate="rel", object="B")
@@ -114,10 +109,12 @@ class TestConfidenceBounds:
         assert "id" in result
 
     async def test_batch_rejects_only_the_bad_item(self, temp_fact_store):
-        result = await add_facts_batch([
-            {"subject": "A", "predicate": "rel", "object": "B", "confidence": 0.9},
-            {"subject": "C", "predicate": "rel", "object": "D", "confidence": 5.0},
-        ])
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "rel", "object": "B", "confidence": 0.9},
+                {"subject": "C", "predicate": "rel", "object": "D", "confidence": 5.0},
+            ]
+        )
         assert result["added"] == 1
         assert len(result["errors"]) == 1
         assert result["errors"][0]["index"] == 1
@@ -126,11 +123,13 @@ class TestConfidenceBounds:
     async def test_batch_rejects_none_and_nonnumeric(self, temp_fact_store):
         # Raw dict input: null and non-numeric confidence are rejected per-item,
         # not passed through to the NOT NULL column.
-        result = await add_facts_batch([
-            {"subject": "A", "predicate": "rel", "object": "B"},  # defaults to 1.0
-            {"subject": "C", "predicate": "rel", "object": "D", "confidence": None},
-            {"subject": "E", "predicate": "rel", "object": "F", "confidence": "high"},
-        ])
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "rel", "object": "B"},  # defaults to 1.0
+                {"subject": "C", "predicate": "rel", "object": "D", "confidence": None},
+                {"subject": "E", "predicate": "rel", "object": "F", "confidence": "high"},
+            ]
+        )
         assert result["added"] == 1
         assert {e["index"] for e in result["errors"]} == {1, 2}
 
@@ -139,21 +138,23 @@ class TestTypeValidation:
     """subject_type / object_type must be non-blank; the tool layer returns a
     structured error dict instead of letting the store raise ValueError."""
 
-    async def test_add_fact_rejects_blank_subject_type(self, temp_fact_store):
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", subject_type="   "
-        )
+    async def test_add_fact_rejects_blank_subject_type(
+        self, temp_fact_store, mock_collection_mutation
+    ):
+        result = await add_fact(subject="A", predicate="rel", object="B", subject_type="   ")
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
         assert "subject_type" in result["message"]
+        mock_collection_mutation.assert_not_awaited()
 
-    async def test_add_fact_rejects_empty_object_type(self, temp_fact_store):
-        result = await add_fact(
-            subject="A", predicate="rel", object="B", object_type=""
-        )
+    async def test_add_fact_rejects_empty_object_type(
+        self, temp_fact_store, mock_collection_mutation
+    ):
+        result = await add_fact(subject="A", predicate="rel", object="B", object_type="")
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
         assert "object_type" in result["message"]
+        mock_collection_mutation.assert_not_awaited()
 
     async def test_add_fact_accepts_explicit_types(self, temp_fact_store):
         result = await add_fact(
@@ -169,11 +170,13 @@ class TestTypeValidation:
     async def test_batch_blank_type_rejects_only_the_bad_item(self, temp_fact_store):
         # The bad item lands in errors; items after it must still be processed
         # (a store-level ValueError would abort the rest of the batch).
-        result = await add_facts_batch([
-            {"subject": "A", "predicate": "rel", "object": "B"},
-            {"subject": "C", "predicate": "rel", "object": "D", "object_type": "  "},
-            {"subject": "E", "predicate": "rel", "object": "F", "subject_type": "person"},
-        ])
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "rel", "object": "B"},
+                {"subject": "C", "predicate": "rel", "object": "D", "object_type": "  "},
+                {"subject": "E", "predicate": "rel", "object": "F", "subject_type": "person"},
+            ]
+        )
         assert result["added"] == 2
         assert len(result["errors"]) == 1
         assert result["errors"][0]["index"] == 1
@@ -183,6 +186,10 @@ class TestTypeValidation:
 class TestTagNormalization:
     """rename_tag / merge_tags must normalize a spaced source tag to the
     stored hyphenated form so it actually matches."""
+
+    @pytest.fixture(autouse=True)
+    def mutation_boundary(self, mock_collection_mutation):
+        """Tag tests stub migration alongside their store and indexer mocks."""
 
     @staticmethod
     def _mocks_with_tag(stored_tag: str):

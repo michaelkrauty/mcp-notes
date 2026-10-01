@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0] - 2026-10-01
+
+### Added
+
+- Configuration-only embedding migrations rebuild mixed collections into isolated physical generations before search or indexing, including when startup auto-indexing is disabled. Previous collections remain available for rollback, and interrupted candidates never become active.
+- Optional `tokenizer` installation extra enables exact model token limits through vector-core.
+
+### Changed
+
+- Pinned vector-core to v1.6.0 for reversible collection migration, role-aware embedding profiles, and tokenizer-backed input limits.
+
+### Fixed
+
+- Search and incremental writes use compatible, fixed generation targets instead of mixing vectors from different models, dimensions, deployments, or formatting profiles. Superseded clients must restart before writing again.
+- Source mutations share the migration lock. Legacy note reconciliation replaces complete changed note/chunk groups and removes confirmed deleted notes without dropping glossary, fact, or document records. Failed candidates leave source files and vocabulary contributions unchanged.
+- Query embeddings explicitly use the query role, while indexed content uses the document role. New note points retain their embedding input for future source-independent migrations.
+- The shared `VECTOR_COLLECTION_NAME` override is honored consistently by note indexing and search.
+
 ## [1.1.2] - 2026-09-04
 
 ### Changed

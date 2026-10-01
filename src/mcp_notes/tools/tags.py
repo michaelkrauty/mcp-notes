@@ -13,6 +13,7 @@ from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.constants import validate_tag as _validate_tag
 from mcp_notes.models import TagInfo
 from mcp_notes.singletons import get_git, get_indexer, get_store
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
 
 
 @mcp.tool()
@@ -36,6 +37,7 @@ async def list_tags() -> list[dict]:
 
 
 @mcp.tool()
+@collection_mutation
 async def rename_tag(
     old_tag: str,
     new_tag: str,
@@ -62,6 +64,7 @@ async def rename_tag(
     if error:
         return error_response(ErrorCode.VALIDATION_FAILED, f"Invalid new tag: {error}")
 
+    await prepare_collection_mutation()
     store = get_store()
     git = get_git()
     indexer = await get_indexer()
@@ -95,6 +98,7 @@ async def rename_tag(
 
 
 @mcp.tool()
+@collection_mutation
 async def merge_tags(
     source_tags: list[str],
     target_tag: str,
@@ -121,6 +125,7 @@ async def merge_tags(
     if not source_normalized:
         return error_response(ErrorCode.VALIDATION_FAILED, "Source tags list cannot be empty")
 
+    await prepare_collection_mutation()
     store = get_store()
     git = get_git()
     indexer = await get_indexer()

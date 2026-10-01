@@ -14,9 +14,11 @@ from vector_core.errors import ErrorCode, error_response
 
 from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.singletons import get_note_service
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
 
 
 @mcp.tool()
+@collection_mutation
 async def create_note(
     title: str,
     content: str,
@@ -37,6 +39,7 @@ async def create_note(
         Created note as dict
     """
     service = await get_note_service()
+    await prepare_collection_mutation()
     result = await service.create(title=title, content=content, tags=tags, category=category)
     if result.success:
         await notify_note_resources(context)
@@ -65,6 +68,7 @@ async def read_note(note_id: str) -> dict:
 
 
 @mcp.tool()
+@collection_mutation
 async def update_note(
     note_id: str,
     title: str | None = None,
@@ -92,6 +96,7 @@ async def update_note(
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {note_id}")
 
     service = await get_note_service()
+    await prepare_collection_mutation()
     result = await service.update(
         note_id=uuid,
         title=title,
@@ -105,6 +110,7 @@ async def update_note(
 
 
 @mcp.tool()
+@collection_mutation
 async def delete_note(note_id: str, context: Context | None = None) -> dict:
     """
     Delete a note. The note is removed from the filesystem and search index,
@@ -122,6 +128,7 @@ async def delete_note(note_id: str, context: Context | None = None) -> dict:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {note_id}")
 
     service = await get_note_service()
+    await prepare_collection_mutation()
     result = await service.delete(uuid)
 
     if result.success:

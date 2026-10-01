@@ -91,6 +91,7 @@ async def test_server_supports_modern_and_legacy_protocols(
 @pytest.mark.asyncio
 async def test_note_mutation_publishes_resource_update(
     monkeypatch: pytest.MonkeyPatch,
+    mock_collection_mutation,
 ) -> None:
     from mcp_notes.tools import notes as notes_tools  # noqa: PLC0415
 
@@ -129,6 +130,7 @@ async def test_note_mutation_publishes_resource_update(
 @pytest.mark.asyncio
 async def test_bulk_mutation_notifies_before_reindex_failure(
     monkeypatch: pytest.MonkeyPatch,
+    mock_collection_mutation,
 ) -> None:
     from mcp_notes.tools import tags as tags_tools  # noqa: PLC0415
 

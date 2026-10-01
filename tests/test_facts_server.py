@@ -25,7 +25,7 @@ from mcp_notes.server import (
 
 
 @pytest.fixture
-def temp_fact_store(tmp_path, monkeypatch):
+def temp_fact_store(tmp_path, monkeypatch, mock_collection_mutation):
     """Create temporary fact store for tests."""
     import mcp_notes.singletons as singletons_module
 
@@ -36,9 +36,7 @@ def temp_fact_store(tmp_path, monkeypatch):
     db_path = tmp_path / "test_facts.db"
     temp_store = FactStore(db_path=db_path)
     singletons_module._fact_store.set_instance(temp_store)
-    monkeypatch.setattr(
-        facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock())
-    )
+    monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=AsyncMock()))
 
     yield temp_store
 
@@ -203,9 +201,7 @@ class TestAddFactsBatch:
         assert result["errors"][0]["index"] == 1
 
     @pytest.mark.asyncio
-    async def test_add_batch_non_string_field_reports_error_not_crash(
-        self, temp_fact_store
-    ):
+    async def test_add_batch_non_string_field_reports_error_not_crash(self, temp_fact_store):
         """A non-string subject/predicate/object (the batch's list[dict] values
         are not schema-coerced) must be reported in errors[] and the item
         skipped, not crash the whole batch after partial commits."""
@@ -222,9 +218,7 @@ class TestAddFactsBatch:
         assert result["errors"][0]["index"] == 1
 
     @pytest.mark.asyncio
-    async def test_add_batch_non_string_date_reports_error_not_crash(
-        self, temp_fact_store
-    ):
+    async def test_add_batch_non_string_date_reports_error_not_crash(self, temp_fact_store):
         """A non-string valid_from/valid_to (e.g. a JSON integer) must be
         reported in errors[] and the item skipped, not raise an uncaught
         TypeError from date.fromisoformat that aborts the batch after earlier
@@ -562,8 +556,11 @@ class TestFactDateRangeValidation:
     @pytest.mark.asyncio
     async def test_add_fact_rejects_inverted_range(self, temp_fact_store):
         result = await add_fact(
-            subject="A", predicate="r", object="B",
-            valid_from="2025-01-01", valid_to="2024-01-01",
+            subject="A",
+            predicate="r",
+            object="B",
+            valid_from="2025-01-01",
+            valid_to="2024-01-01",
         )
         assert "error_code" in result
         assert "valid_from" in str(result)
@@ -572,8 +569,11 @@ class TestFactDateRangeValidation:
     @pytest.mark.asyncio
     async def test_add_fact_accepts_ordered_range(self, temp_fact_store):
         result = await add_fact(
-            subject="A", predicate="r", object="B",
-            valid_from="2024-01-01", valid_to="2025-01-01",
+            subject="A",
+            predicate="r",
+            object="B",
+            valid_from="2024-01-01",
+            valid_to="2025-01-01",
         )
         assert "id" in result
 
@@ -581,8 +581,13 @@ class TestFactDateRangeValidation:
     async def test_batch_inverted_item_does_not_abort_others(self, temp_fact_store):
         facts = [
             {"subject": "A", "predicate": "r", "object": "B"},
-            {"subject": "C", "predicate": "r", "object": "D",
-             "valid_from": "2025-01-01", "valid_to": "2024-01-01"},
+            {
+                "subject": "C",
+                "predicate": "r",
+                "object": "D",
+                "valid_from": "2025-01-01",
+                "valid_to": "2024-01-01",
+            },
             {"subject": "E", "predicate": "r", "object": "F"},
         ]
         result = await add_facts_batch(facts)
@@ -594,7 +599,10 @@ class TestFactDateRangeValidation:
     @pytest.mark.asyncio
     async def test_update_fact_rejects_inverting_range(self, temp_fact_store):
         created = await add_fact(
-            subject="A", predicate="r", object="B", valid_to="2024-01-01",
+            subject="A",
+            predicate="r",
+            object="B",
+            valid_to="2024-01-01",
         )
         result = await update_fact(fact_id=created["id"], valid_from="2025-01-01")
         assert "error_code" in result
@@ -610,13 +618,9 @@ class TestFactIndexSync:
     and created or updated facts would be missing or stale."""
 
     @pytest.mark.asyncio
-    async def test_add_fact_indexes_created_fact(
-        self, temp_fact_store, monkeypatch
-    ):
+    async def test_add_fact_indexes_created_fact(self, temp_fact_store, monkeypatch):
         indexer = AsyncMock()
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
         created = await add_fact(subject="A", predicate="p", object="B")
 
@@ -628,14 +632,14 @@ class TestFactIndexSync:
         self, temp_fact_store, monkeypatch
     ):
         indexer = AsyncMock()
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
-        result = await add_facts_batch([
-            {"subject": "A", "predicate": "p", "object": "B"},
-            {"subject": "C", "predicate": "p", "object": "D"},
-        ])
+        result = await add_facts_batch(
+            [
+                {"subject": "A", "predicate": "p", "object": "B"},
+                {"subject": "C", "predicate": "p", "object": "D"},
+            ]
+        )
 
         assert result["added"] == 2
         indexer.index_all.assert_awaited_once_with(force=False)
@@ -647,9 +651,7 @@ class TestFactIndexSync:
     ):
         indexer = AsyncMock()
         indexer.index_fact.side_effect = RuntimeError("index unavailable")
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
         with caplog.at_level("WARNING", logger=facts_mod.__name__):
             created = await add_fact(subject="A", predicate="p", object="B")
@@ -664,15 +666,15 @@ class TestFactIndexSync:
     ):
         indexer = AsyncMock()
         indexer.index_all.side_effect = RuntimeError("index unavailable")
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
         with caplog.at_level("WARNING", logger=facts_mod.__name__):
-            result = await add_facts_batch([
-                {"subject": "A", "predicate": "p", "object": "B"},
-                {"subject": "C", "predicate": "p", "object": "D"},
-            ])
+            result = await add_facts_batch(
+                [
+                    {"subject": "A", "predicate": "p", "object": "B"},
+                    {"subject": "C", "predicate": "p", "object": "D"},
+                ]
+            )
 
         assert result == {
             "added": 2,
@@ -684,13 +686,9 @@ class TestFactIndexSync:
         assert "Failed to index 2 added facts" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_delete_fact_removes_point_from_index(
-        self, temp_fact_store, monkeypatch
-    ):
+    async def test_delete_fact_removes_point_from_index(self, temp_fact_store, monkeypatch):
         indexer = AsyncMock()
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
         created = await add_fact(subject="Zorblax", predicate="rules", object="Mars")
         indexer.reset_mock()  # ignore any indexing during add
@@ -704,9 +702,7 @@ class TestFactIndexSync:
     @pytest.mark.asyncio
     async def test_update_fact_reindexes(self, temp_fact_store, monkeypatch):
         indexer = AsyncMock()
-        monkeypatch.setattr(
-            facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer)
-        )
+        monkeypatch.setattr(facts_mod, "get_fact_indexer", AsyncMock(return_value=indexer))
 
         created = await add_fact(subject="A", predicate="p", object="B")
         indexer.reset_mock()

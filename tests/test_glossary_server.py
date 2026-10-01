@@ -1,5 +1,6 @@
 """Tests for glossary MCP tools."""
 
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -474,6 +475,14 @@ class TestGlossaryInputValidation:
     GlossaryToolHelper), so the validation lives in the tool layer here.
     """
 
+    @pytest.fixture(autouse=True)
+    def mocked_vector_boundary(self, monkeypatch, mock_collection_mutation):
+        """Keep input validation real while isolating vector service boundaries."""
+        monkeypatch.setattr(
+            "mcp_notes.tools.glossary.get_glossary_indexer",
+            AsyncMock(return_value=AsyncMock()),
+        )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("term", "expansion", "definition", "field"),
@@ -485,45 +494,52 @@ class TestGlossaryInputValidation:
         ],
     )
     async def test_add_blank_required_field(
-        self, tmp_notes_dir, term, expansion, definition, field
+        self, tmp_notes_dir, term, expansion, definition, field, mock_collection_mutation
     ):
         result = await add_glossary_entry(term, expansion, definition)
 
         assert result["error_code"] == "invalid_input"
         assert field in result["message"]
         assert get_glossary_store().count() == 0
+        mock_collection_mutation.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_add_blank_alias(self, tmp_notes_dir):
-        result = await add_glossary_entry(
-            "TERM", "Expansion", "Definition", aliases=["ok", "  "]
-        )
+    async def test_add_blank_alias(self, tmp_notes_dir, mock_collection_mutation):
+        result = await add_glossary_entry("TERM", "Expansion", "Definition", aliases=["ok", "  "])
 
         assert result["error_code"] == "invalid_input"
         assert get_glossary_store().count() == 0
+        mock_collection_mutation.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("aliases", [
-        ["api", " api "],
-        ["API", "api"],
-        ["dup", "other", "dup"],
-    ])
-    async def test_add_duplicate_aliases_rejected(self, tmp_notes_dir, aliases):
+    @pytest.mark.parametrize(
+        "aliases",
+        [
+            ["api", " api "],
+            ["API", "api"],
+            ["dup", "other", "dup"],
+        ],
+    )
+    async def test_add_duplicate_aliases_rejected(
+        self, tmp_notes_dir, aliases, mock_collection_mutation
+    ):
         """Aliases that collide after strip + case-fold fail fast instead of
         hitting the UNIQUE constraint mid-insert."""
-        result = await add_glossary_entry(
-            "TERM", "Expansion", "Definition", aliases=aliases
-        )
+        result = await add_glossary_entry("TERM", "Expansion", "Definition", aliases=aliases)
 
         assert result["error_code"] == "invalid_input"
         assert "duplicate alias" in result["message"]
         assert get_glossary_store().count() == 0
+        mock_collection_mutation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_add_strips_whitespace_and_blank_domain_is_none(self, tmp_notes_dir):
         result = await add_glossary_entry(
-            "  USAF  ", "  United States Air Force ", " Air branch. ",
-            domain="   ", aliases=[" Air Force "],
+            "  USAF  ",
+            "  United States Air Force ",
+            " Air branch. ",
+            domain="   ",
+            aliases=[" Air Force "],
         )
 
         assert "error_code" not in result
@@ -534,19 +550,26 @@ class TestGlossaryInputValidation:
         assert result["aliases"] == ["Air Force"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kwargs", [
-        {"term": " "},
-        {"expansion": ""},
-        {"definition": "\n"},
-        {"aliases": ["valid", ""]},
-        {"aliases": ["new", " New "]},
-    ])
-    async def test_update_blank_or_duplicate_field(self, tmp_notes_dir, kwargs):
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"term": " "},
+            {"expansion": ""},
+            {"definition": "\n"},
+            {"aliases": ["valid", ""]},
+            {"aliases": ["new", " New "]},
+        ],
+    )
+    async def test_update_blank_or_duplicate_field(
+        self, tmp_notes_dir, kwargs, mock_collection_mutation
+    ):
         await add_glossary_entry("API", "Expansion", "Definition")
+        mock_collection_mutation.reset_mock()
 
         result = await update_glossary_entry("API", **kwargs)
 
         assert result["error_code"] == "invalid_input"
+        mock_collection_mutation.assert_not_awaited()
         # Entry unchanged
         entry = get_glossary_store().lookup("API")
         assert entry.expansion == "Expansion"

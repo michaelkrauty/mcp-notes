@@ -15,6 +15,7 @@ from vector_core.errors import ErrorCode, error_response
 from mcp_notes.app import mcp, notify_note_resources
 from mcp_notes.singletons import get_git, get_indexer, get_store
 from mcp_notes.storage.filesystem import NoteNotFoundError
+from mcp_notes.tools.mutation import collection_mutation, prepare_collection_mutation
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ async def get_note_history(note_id: str, limit: int = 10) -> list[dict]:
 
 
 @mcp.tool()
+@collection_mutation
 async def restore_note_version(
     note_id: str,
     version_id: str,
@@ -64,15 +66,16 @@ async def restore_note_version(
     Returns:
         Restored note
     """
-    store = get_store()
-    git = get_git()
-    indexer = await get_indexer()
-
     try:
         uuid = UUID(note_id)
     except ValueError:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid UUID: {note_id}")
 
+    store = get_store()
+    git = get_git()
+    indexer = await get_indexer()
+
+    await prepare_collection_mutation()
     # Get title and current path
     try:
         note = store.read(uuid)

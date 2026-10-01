@@ -1,5 +1,6 @@
 """Tests for note indexer."""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -12,15 +13,27 @@ from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.models import IndexStatus
 
 
+@pytest.fixture(autouse=True)
+def ready_generation(monkeypatch):
+    """Indexing unit tests isolate writes from the migration coordinator."""
+
+    @asynccontextmanager
+    async def collection_operation(indexer):
+        yield
+
+    monkeypatch.setattr(NoteIndexer, "collection_operation", collection_operation)
+
+
 class TestNoteIndexerInit:
     """Tests for NoteIndexer initialization."""
 
     def test_init_default(self):
         """Creates default components if not provided."""
-        with patch("mcp_notes.indexing.indexer.NoteStore") as mock_store, \
-             patch("mcp_notes.indexing.indexer.QdrantStorage") as mock_storage, \
-             patch("mcp_notes.indexing.indexer.EmbeddingClient") as mock_embedder:
-
+        with (
+            patch("mcp_notes.indexing.indexer.NoteStore") as mock_store,
+            patch("mcp_notes.indexing.indexer.QdrantStorage") as mock_storage,
+            patch("mcp_notes.indexing.indexer.EmbeddingClient") as mock_embedder,
+        ):
             NoteIndexer()
 
             mock_store.assert_called_once()
@@ -214,18 +227,15 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force(self):
-        """Force reindex scopes its clear to note/chunk points.
-
-        Notes, chunks, glossary entries, and facts share one Qdrant collection,
-        so force must not delete and recreate the whole collection (which would
-        destroy the glossary and fact points, with no notes-side rebuild). It
-        clears only the note and chunk points, mirroring the facts indexer.
-        """
+        """Force reindex clears only known note groups from this source root."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_store.iter_all.return_value = iter([])
         mock_storage = AsyncMock()
         mock_storage.collection_exists.return_value = True
+        mock_store.notes_dir = mock_store.base_dir / "notes"
+        mock_store.get_note_path.return_value = mock_store.notes_dir / "known.md"
+        mock_storage.scroll_points.return_value = [{"type": "note", "note_id": str(UUID(int=1))}]
 
         indexer = NoteIndexer(
             note_store=mock_store,
@@ -237,13 +247,9 @@ class TestNoteIndexerIndexAll:
 
         # Must NOT nuke the shared collection (would destroy glossary + facts).
         mock_storage.delete_collection.assert_not_called()
-        # Clears only the note and chunk points.
-        cleared = {
-            (c.args[1], c.args[2])
-            for c in mock_storage.delete_by_filter.call_args_list
-        }
-        assert ("type", "note") in cleared
-        assert ("type", "chunk") in cleared
+        mock_storage.delete_by_filter.assert_awaited_once_with(
+            indexer.collection_name, field="note_id", value=str(UUID(int=1))
+        )
 
     @pytest.mark.asyncio
     async def test_index_all_partial_failure_accounting(self):
@@ -352,7 +358,7 @@ class TestNoteIndexerIndexAll:
 
     @pytest.mark.asyncio
     async def test_index_all_force_skips_orphan_pruning(self):
-        """Force mode clears all note/chunk points, so it does not scan for orphans."""
+        """Force clears owned groups, so no second orphan-chunk scan is needed."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         parsed = MagicMock()
@@ -376,7 +382,9 @@ class TestNoteIndexerIndexAll:
             await indexer.index_all(force=True)
 
         mock_storage.delete_points.assert_not_called()
-        mock_storage.scroll_points.assert_not_called()
+        mock_storage.scroll_points.assert_awaited_once_with(
+            indexer.collection_name, payload_fields=["type", "note_id"], max_results=0
+        )
 
 
 class TestNoteIndexerDeleteOrphanChunks:
@@ -505,8 +513,6 @@ class TestNoteIndexerGetIndexedHashes:
         assert hashes == {}
 
 
-
-
 class TestNoteIndexerGetStatus:
     """Tests for get_status method."""
 
@@ -608,7 +614,9 @@ class TestNoteIndexerCreatePoint:
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_global_vocab = MagicMock()
-        mock_global_vocab.vectorize_document.return_value = MagicMock(indices=[1, 2], values=[0.5, 0.5])
+        mock_global_vocab.vectorize_document.return_value = MagicMock(
+            indices=[1, 2], values=[0.5, 0.5]
+        )
 
         indexer = NoteIndexer(
             note_store=mock_store,
@@ -630,7 +638,7 @@ class TestNoteIndexerCreatePoint:
         assert point is not None
         assert "dense" in point.vector
         assert "sparse" in point.vector
-        assert point.payload == {"type": "chunk"}
+        assert point.payload == {"type": "chunk", "embedding_text": "test content"}
 
     def test_create_point_without_chunk_index(self):
         """Creates point without chunk index in ID."""

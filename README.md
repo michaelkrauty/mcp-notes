@@ -17,7 +17,7 @@ Supports stateless MCP `2026-07-28` requests and legacy MCP clients from the sam
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.5.0
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.6.0
 pip install git+https://github.com/michaelkrauty/mcp-notes.git
 ```
 
@@ -193,6 +193,16 @@ Notes stored as `{slug}-{uuid}.md` organized by category subdirectories.
 | `NOTES_COLLECTION_PREFIX` | `notes` | Qdrant collection prefix |
 
 Plus inherited vector-core settings (`VECTOR_QDRANT_URL`, `VECTOR_EMBEDDING_URL`, etc.).
+
+### Changing embedding models
+
+Update the vector-core embedding configuration and restart the client. The first search or write automatically builds a compatible physical collection, including notes, chunks, glossary entries, facts, and other retained content in a shared collection. This also works with `NOTES_AUTO_INDEX=false`. There is no separate destructive reindex step.
+
+Model, resolved dimension, deployment namespace, and input formatting are part of the embedding identity. Change the deployment namespace whenever an unchanged model alias points to different weights. Reads and writes use a fixed physical generation; an older client that has been superseded must restart before further operations. Stop legacy server versions before changing configuration because those versions do not participate in migration locking.
+
+The original collection is retained. Failed builds remain inactive, and retrying creates a fresh candidate. New records preserve embedding input. Legacy note summaries without retained text can be rebuilt from stored metadata; their original chunks remain searchable. When local source changes are detected, complete note/chunk groups are refreshed without changing unrelated record types. Their vocabulary contribution is reconciled by the next normal full indexing pass. Missing sources belonging to another note directory use retained content rather than being treated as deleted.
+
+For exact tokenizer-based input limits, install the optional extra with `uv sync --extra tokenizer` or `pip install 'mcp-notes[tokenizer]'`, then configure vector-core's tokenizer and token limit. Without that extra, vector-core uses its conservative fallback limit. Query and document formatting is handled by the embedding client; callers should provide ordinary, unprefixed text.
 
 ## Search Query Syntax
 

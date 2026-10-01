@@ -121,7 +121,7 @@ async def get_glossary_indexer() -> GlossaryIndexer:
         indexer = await get_indexer()
         return GlossaryIndexer(
             glossary_store=get_glossary_store(),
-            collection_name=indexer.collection_name,
+            collection_name=indexer.logical_collection_name,
             storage=indexer.storage,
             embedder=indexer.embedder,
             global_vocab=indexer.global_vocab,
@@ -141,7 +141,7 @@ async def get_fact_indexer() -> FactIndexer:
             storage=indexer.storage,
             embedder=indexer.embedder,
             global_vocab=indexer.global_vocab,
-            collection_name=indexer.collection_name,
+            collection_name=indexer.logical_collection_name,
         )
 
     return await _fact_indexer.get(_create_fact_indexer)
