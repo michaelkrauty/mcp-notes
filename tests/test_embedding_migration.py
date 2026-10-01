@@ -20,6 +20,7 @@ from vector_core.storage.embedding_migration import (
     resolve_shared_embedding_text,
 )
 
+from mcp_notes.indexing.chunker import chunk_note
 from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.indexing.migration import NotesMigration, ensure_notes_collection
 from mcp_notes.search.engine import NoteSearchEngine
@@ -166,6 +167,28 @@ async def test_external_edit_rebuilds_whole_group_without_stale_chunks(corpus):
     result = await points(indexer, generation.physical_name)
     assert result[generate_point_id(f"note:{note.id}")].payload["note_hash"]
     assert not result[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
+
+
+async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):
+    indexer, note = corpus
+    parsed = parse_note(indexer.note_store.read(note.id).content)
+    full_text = chunk_note(parsed)[0].content
+    chunk_id = generate_point_id(f"chunk:{note.id}:0")
+    client = await indexer.storage.get_client()
+    await client.set_payload(
+        indexer.logical_collection_name, {"content": full_text[:8]}, points=[chunk_id]
+    )
+    original = await points(indexer, indexer.logical_collection_name)
+    generation = await ensure_notes_collection(indexer)
+    migrated = await points(indexer, generation.physical_name)
+    assert migrated[chunk_id].payload["embedding_text"] == full_text
+    assert migrated[chunk_id].vector["sparse"] == original[chunk_id].vector["sparse"]
+    assert any(full_text in call.args[0] for call in indexer.embedder.embed_all.await_args_list)
+    await indexer.index_all()
+    assert (await points(indexer, generation.physical_name))[chunk_id].payload[
+        "embedding_text"
+    ] == full_text
+    assert await points(indexer, indexer.logical_collection_name) == original
 
 
 async def test_confirmed_external_delete_omits_note_group_only(corpus):

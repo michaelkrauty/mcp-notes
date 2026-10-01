@@ -15,6 +15,7 @@ from vector_core.storage.embedding_migration import (
     resolve_shared_embedding_text,
 )
 
+from mcp_notes.indexing.chunker import chunk_note
 from mcp_notes.storage.parser import ParsedNote, parse_note
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class NotesMigration:
         self.indexer = indexer
         self._rebuild_ids: set[UUID] = set()
         self._notes: dict[UUID, tuple[ParsedNote, str | None]] | None = None
+        self._chunk_texts: dict[UUID, list[str]] = {}
 
     def _source_notes(self) -> dict[UUID, tuple[ParsedNote, str | None]]:
         # Each ensure_notes_collection call owns a fresh coordinator, including
@@ -42,7 +44,8 @@ class NotesMigration:
         return self._notes
 
     async def resolve_text(self, payload: dict[str, Any]) -> str | None:
-        if payload.get("type") == "note":
+        point_type = payload.get("type")
+        if point_type == "note" or (point_type == "chunk" and "embedding_text" not in payload):
             note_id = UUID(payload["note_id"])
             # Shared collections can contain notes owned by another directory.
             # Absence from this store is not evidence that those notes were deleted.
@@ -50,7 +53,19 @@ class NotesMigration:
             if path is None or any(part.is_symlink() for part in (path, *path.parents)):
                 return await resolve_shared_embedding_text(payload)
             source = self._source_notes().get(note_id)
-            if source is None or self.indexer._hash_note(*source) != payload.get("note_hash"):
+            if source is None or (
+                point_type == "note"
+                and self.indexer._hash_note(*source) != payload.get("note_hash")
+            ):
+                self._rebuild_ids.add(note_id)
+                return None
+            if point_type == "chunk":
+                if note_id not in self._chunk_texts:
+                    self._chunk_texts[note_id] = [chunk.content for chunk in chunk_note(source[0])]
+                texts = self._chunk_texts[note_id]
+                index = payload.get("chunk_index")
+                if isinstance(index, int) and 0 <= index < len(texts):
+                    return texts[index]
                 self._rebuild_ids.add(note_id)
                 return None
         return await resolve_shared_embedding_text(payload)
