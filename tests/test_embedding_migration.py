@@ -1,7 +1,9 @@
 """Mixed notes migration against isolated in-memory Qdrant and temporary sources."""
 
+from contextlib import asynccontextmanager
 from datetime import date
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from qdrant_client import AsyncQdrantClient
@@ -23,7 +25,7 @@ from mcp_notes.indexing.migration import ensure_notes_collection
 from mcp_notes.search.engine import NoteSearchEngine
 from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.parser import parse_note
-from mcp_notes.tools import facts, mutation, notes, versioning
+from mcp_notes.tools import categories, facts, mutation, notes, tags, versioning
 
 
 def model(name="new-model", dimension=128, namespace="deployment-1"):
@@ -328,3 +330,39 @@ async def test_invalid_effective_fact_range_never_initializes_migration(tmp_path
     getter.assert_not_awaited()
     assert store.read(fact.id).valid_to is None
     store.close()
+
+
+@pytest.mark.parametrize(
+    "module,tool,args",
+    [
+        (tags, tags.rename_tag, ("old", "new")),
+        (tags, tags.merge_tags, (["old"], "new")),
+        (categories, categories.move_category, ("old", "new")),
+    ],
+)
+async def test_bulk_source_snapshot_is_taken_under_writer_lock(module, tool, args, monkeypatch):
+    locked = False
+
+    @asynccontextmanager
+    async def operation():
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    def snapshot():
+        assert locked, "source snapshot must not race a competing source mutation"
+        return []
+
+    indexer = SimpleNamespace(collection_operation=operation)
+    store = MagicMock()
+    store.list_all.side_effect = snapshot
+    getter = AsyncMock(return_value=indexer)
+    monkeypatch.setattr(mutation, "get_indexer", getter)
+    monkeypatch.setattr(module, "get_indexer", getter)
+    monkeypatch.setattr(module, "get_store", lambda: store)
+    monkeypatch.setattr(module, "get_git", MagicMock())
+    assert await tool(*args) == {"updated_count": 0}
+    assert not locked

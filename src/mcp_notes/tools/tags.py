@@ -64,6 +64,7 @@ async def rename_tag(
     if error:
         return error_response(ErrorCode.VALIDATION_FAILED, f"Invalid new tag: {error}")
 
+    await prepare_collection_mutation()
     store = get_store()
     git = get_git()
     indexer = await get_indexer()
@@ -79,7 +80,6 @@ async def rename_tag(
                 if replacement not in new_tags:
                     new_tags.append(replacement)
 
-            await prepare_collection_mutation()
             store.update(
                 note_id=summary.id,
                 tags=new_tags,
@@ -125,6 +125,7 @@ async def merge_tags(
     if not source_normalized:
         return error_response(ErrorCode.VALIDATION_FAILED, "Source tags list cannot be empty")
 
+    await prepare_collection_mutation()
     store = get_store()
     git = get_git()
     indexer = await get_indexer()
@@ -138,7 +139,6 @@ async def merge_tags(
             if target_normalized not in new_tags:
                 new_tags.append(target_normalized)
 
-            await prepare_collection_mutation()
             store.update(
                 note_id=summary.id,
                 tags=new_tags,

@@ -70,6 +70,7 @@ async def move_category(
     old_norm = slugify_category_path(old_path)
     new_norm = slugify_category_path(new_path)
 
+    await prepare_collection_mutation()
     updated = 0
     for summary in store.list_all():
         if summary.category and old_norm:
@@ -83,7 +84,6 @@ async def move_category(
                 new_category = new_norm + summary.category[len(old_norm) :]
 
                 old_note_path = store.get_note_path(summary.id)
-                await prepare_collection_mutation()
                 store.update(
                     note_id=summary.id,
                     category=new_category,
