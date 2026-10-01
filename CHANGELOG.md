@@ -7,6 +7,10 @@
 - Configuration-only embedding migrations rebuild mixed collections into isolated physical generations before search or indexing, including when startup auto-indexing is disabled. Previous collections remain available for rollback, and interrupted candidates never become active.
 - Optional `tokenizer` installation extra enables exact model token limits through vector-core.
 
+### Changed
+
+- Pinned vector-core to v1.6.0 for reversible collection migration, role-aware embedding profiles, and tokenizer-backed input limits.
+
 ### Fixed
 
 - Search and incremental writes use compatible, fixed generation targets instead of mixing vectors from different models, dimensions, deployments, or formatting profiles. Superseded clients must restart before writing again.
