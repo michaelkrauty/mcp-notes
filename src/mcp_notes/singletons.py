@@ -22,7 +22,6 @@ from mcp_notes.facts import (
     SourceIntegrityManager,
 )
 from mcp_notes.indexing.indexer import NoteIndexer
-from mcp_notes.indexing.migration import NotesMigration
 from mcp_notes.links.resolver import LinkResolver
 from mcp_notes.search.engine import NoteSearchEngine
 from mcp_notes.services import NoteService
@@ -120,15 +119,12 @@ async def get_glossary_indexer() -> GlossaryIndexer:
     async def _create_glossary_indexer() -> GlossaryIndexer:
         # Get indexer for shared resources
         indexer = await get_indexer()
-        migration = NotesMigration(indexer)
         return GlossaryIndexer(
             glossary_store=get_glossary_store(),
             collection_name=indexer.logical_collection_name,
             storage=indexer.storage,
             embedder=indexer.embedder,
             global_vocab=indexer.global_vocab,
-            text_resolver=migration.resolve_text,
-            finalize_candidate=migration.finalize,
         )
 
     return await _glossary_indexer.get(_create_glossary_indexer)
@@ -140,15 +136,12 @@ async def get_fact_indexer() -> FactIndexer:
     async def _create_fact_indexer() -> FactIndexer:
         # Get indexer for shared resources
         indexer = await get_indexer()
-        migration = NotesMigration(indexer)
         return FactIndexer(
             fact_store=get_fact_store(),
             storage=indexer.storage,
             embedder=indexer.embedder,
             global_vocab=indexer.global_vocab,
             collection_name=indexer.logical_collection_name,
-            text_resolver=migration.resolve_text,
-            finalize_candidate=migration.finalize,
         )
 
     return await _fact_indexer.get(_create_fact_indexer)

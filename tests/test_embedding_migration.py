@@ -21,7 +21,7 @@ from vector_core.storage.embedding_migration import (
 )
 
 from mcp_notes.indexing.indexer import NoteIndexer
-from mcp_notes.indexing.migration import ensure_notes_collection
+from mcp_notes.indexing.migration import NotesMigration, ensure_notes_collection
 from mcp_notes.search.engine import NoteSearchEngine
 from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.parser import parse_note
@@ -112,7 +112,7 @@ async def corpus(tmp_path, monkeypatch):
 
 async def points(indexer, collection):
     client = await indexer.storage.get_client()
-    records, _ = await client.scroll(collection, with_payload=True, with_vectors=True)
+    records, _ = await client.scroll(collection, with_payload=True, with_vectors=True, limit=1000)
     return {point.id: point for point in records if point.id != 0}
 
 
@@ -366,3 +366,54 @@ async def test_bulk_source_snapshot_is_taken_under_writer_lock(module, tool, arg
     monkeypatch.setattr(module, "get_git", MagicMock())
     assert await tool(*args) == {"updated_count": 0}
     assert not locked
+
+
+async def test_migration_reads_one_snapshot_for_all_notes_and_finalizer(corpus, monkeypatch):
+    indexer, original = corpus
+    added_ids = []
+    for number in range(5):
+        note = indexer.note_store.create(f"Note {number}", f"Original content {number}")
+        await indexer._index_note(parse_note(note.content), None)
+        added_ids.extend(
+            [
+                generate_point_id(f"note:{note.id}"),
+                generate_point_id(f"chunk:{note.id}:0"),
+            ]
+        )
+    client = await indexer.storage.get_client()
+    await client.delete_payload(
+        indexer.logical_collection_name, keys=["embedding_text"], points=added_ids, wait=True
+    )
+    indexer.note_store.update(original.id, content="Changed content")
+    snapshot = NotesMigration._snapshot
+    scans = 0
+
+    def counted_snapshot(coordinator):
+        nonlocal scans
+        scans += 1
+        return snapshot(coordinator)
+
+    monkeypatch.setattr(NotesMigration, "_snapshot", counted_snapshot)
+    generation = await ensure_notes_collection(indexer)
+    assert scans == 1
+    assert len(await points(indexer, generation.physical_name)) == 14
+
+
+async def test_failed_migration_retry_reads_new_source_snapshot(corpus):
+    indexer, note = corpus
+    indexer.note_store.update(note.id, content="First edit")
+    indexer.embedder.embed_all.side_effect = [
+        [[1.0] + [0.0] * 127] * 3,
+        RuntimeError("candidate interrupted"),
+    ]
+    with pytest.raises(EmbeddingMigrationError, match="candidate interrupted"):
+        await ensure_notes_collection(indexer)
+    indexer.note_store.update(note.id, content="Later edit after failed migration")
+    indexer.embedder.embed_all.side_effect = lambda texts, **kwargs: [
+        [1.0] + [0.0] * 127 for _ in texts
+    ]
+    generation = await ensure_notes_collection(indexer)
+    result = await points(indexer, generation.physical_name)
+    text = result[generate_point_id(f"note:{note.id}")].payload["embedding_text"]
+    assert "Later edit after failed migration" in text
+    assert "First edit" not in text

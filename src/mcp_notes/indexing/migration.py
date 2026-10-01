@@ -32,6 +32,14 @@ class NotesMigration:
     def __init__(self, indexer: NoteIndexer):
         self.indexer = indexer
         self._rebuild_ids: set[UUID] = set()
+        self._notes: dict[UUID, tuple[ParsedNote, str | None]] | None = None
+
+    def _source_notes(self) -> dict[UUID, tuple[ParsedNote, str | None]]:
+        # Each ensure_notes_collection call owns a fresh coordinator, including
+        # retries. Read once per attempt, never once per retained point.
+        if self._notes is None:
+            self._notes = self._snapshot()
+        return self._notes
 
     async def resolve_text(self, payload: dict[str, Any]) -> str | None:
         if payload.get("type") == "note":
@@ -41,7 +49,7 @@ class NotesMigration:
             path = self.indexer.note_store.get_note_path(note_id)
             if path is None or any(part.is_symlink() for part in (path, *path.parents)):
                 return await resolve_shared_embedding_text(payload)
-            source = self._snapshot().get(note_id)
+            source = self._source_notes().get(note_id)
             if source is None or self.indexer._hash_note(*source) != payload.get("note_hash"):
                 self._rebuild_ids.add(note_id)
                 return None
@@ -76,7 +84,7 @@ class NotesMigration:
             return
         # Complete the scan before changing candidate points. Unlike iter_all,
         # this scan propagates traversal and parsing errors instead of skipping.
-        notes = self._snapshot()
+        notes = self._source_notes()
         await self.indexer._ensure_global_vocab()
         # Use existing stable token IDs without changing live corpus statistics.
         # A failed candidate must not rewrite the active generation's vocabulary.
