@@ -734,6 +734,7 @@ async def search_facts(
 
 
 @mcp.tool()
+@collection_mutation
 async def index_facts(
     force: bool = False,
 ) -> dict:
@@ -746,6 +747,7 @@ async def index_facts(
     Returns:
         Indexing result with counts
     """
+    await prepare_collection_mutation()
     indexer = await get_fact_indexer()
     result = await indexer.index_all(force=force)
     return result

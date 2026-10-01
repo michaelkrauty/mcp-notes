@@ -24,6 +24,7 @@ from mcp_notes.indexing.chunker import chunk_note
 from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.indexing.migration import NotesMigration, ensure_notes_collection
 from mcp_notes.search.engine import NoteSearchEngine
+from mcp_notes.settings import settings
 from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.parser import parse_note
 from mcp_notes.tools import categories, facts, mutation, notes, tags, versioning
@@ -75,7 +76,7 @@ async def corpus(tmp_path, monkeypatch):
                 "note_id": str(note.id),
                 "chunk_index": 0,
                 "title": note.title,
-                "content": "Original content",
+                "content": chunk_note(parsed)[0].content,
                 "tags": [],
             },
         ),
@@ -182,7 +183,7 @@ async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):
     generation = await ensure_notes_collection(indexer)
     migrated = await points(indexer, generation.physical_name)
     assert migrated[chunk_id].payload["embedding_text"] == full_text
-    assert migrated[chunk_id].vector["sparse"] == original[chunk_id].vector["sparse"]
+    assert migrated[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
     assert any(full_text in call.args[0] for call in indexer.embedder.embed_all.await_args_list)
     await indexer.index_all()
     assert (await points(indexer, generation.physical_name))[chunk_id].payload[
@@ -198,6 +199,56 @@ async def test_confirmed_external_delete_omits_note_group_only(corpus):
     result = await points(indexer, generation.physical_name)
     assert {point.payload["type"] for point in result.values()} == {"fact", "glossary"}
     assert len(await points(indexer, indexer.logical_collection_name)) == 4
+
+
+async def test_changed_chunk_boundaries_rebuild_complete_unchanged_note(corpus, monkeypatch):
+    indexer, note = corpus
+    indexer.note_store.update(
+        note.id, content="First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+    )
+    parsed = parse_note(indexer.note_store.read(note.id).content)
+    await indexer._index_note(parsed, None)
+    client = await indexer.storage.get_client()
+    await client.delete_payload(
+        indexer.logical_collection_name,
+        keys=["embedding_text"],
+        points=[generate_point_id(f"chunk:{note.id}:0")],
+        wait=True,
+    )
+    monkeypatch.setattr(settings, "max_chunk_chars", 35)
+    expected = [chunk.content for chunk in chunk_note(parsed)]
+    assert len(expected) > 1
+    generation = await ensure_notes_collection(indexer)
+    result = await points(indexer, generation.physical_name)
+    chunks = sorted(
+        (point.payload for point in result.values() if point.payload["type"] == "chunk"),
+        key=lambda payload: payload["chunk_index"],
+    )
+    assert [chunk["embedding_text"] for chunk in chunks] == expected
+    assert result[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
+
+
+async def test_standalone_fact_index_prepares_note_aware_generation(corpus, monkeypatch):
+    indexer, note = corpus
+    indexer.note_store.update(note.id, content="Changed before fact indexing")
+
+    async def index_facts(**kwargs):
+        active = await active_embedding_collection(indexer.storage, indexer.logical_collection_name)
+        assert active != indexer.logical_collection_name
+        result = await points(indexer, active)
+        assert (
+            "Changed before fact indexing"
+            in result[generate_point_id(f"note:{note.id}")].payload["embedding_text"]
+        )
+        return {"indexed": 0}
+
+    monkeypatch.setattr(mutation, "get_indexer", AsyncMock(return_value=indexer))
+    monkeypatch.setattr(
+        facts,
+        "get_fact_indexer",
+        AsyncMock(return_value=SimpleNamespace(index_all=index_facts)),
+    )
+    assert await facts.index_facts() == {"indexed": 0}
 
 
 async def test_failed_source_rebuild_does_not_activate_or_change_vocabulary(corpus):
@@ -425,10 +476,16 @@ async def test_migration_reads_one_snapshot_for_all_notes_and_finalizer(corpus, 
 async def test_failed_migration_retry_reads_new_source_snapshot(corpus):
     indexer, note = corpus
     indexer.note_store.update(note.id, content="First edit")
-    indexer.embedder.embed_all.side_effect = [
-        [[1.0] + [0.0] * 127] * 3,
-        RuntimeError("candidate interrupted"),
-    ]
+    calls = 0
+
+    async def fail_rebuild(texts, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("candidate interrupted")
+        return [[1.0] + [0.0] * 127 for _ in texts]
+
+    indexer.embedder.embed_all.side_effect = fail_rebuild
     with pytest.raises(EmbeddingMigrationError, match="candidate interrupted"):
         await ensure_notes_collection(indexer)
     indexer.note_store.update(note.id, content="Later edit after failed migration")

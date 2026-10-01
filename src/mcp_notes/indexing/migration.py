@@ -64,8 +64,14 @@ class NotesMigration:
                     self._chunk_texts[note_id] = [chunk.content for chunk in chunk_note(source[0])]
                 texts = self._chunk_texts[note_id]
                 index = payload.get("chunk_index")
-                if isinstance(index, int) and 0 <= index < len(texts):
+                if (
+                    isinstance(index, int)
+                    and 0 <= index < len(texts)
+                    and texts[index] == payload.get("content")
+                ):
                     return texts[index]
+                # Truncation and changed chunk boundaries are indistinguishable
+                # from retained text alone. Rebuild the complete source group.
                 self._rebuild_ids.add(note_id)
                 return None
         return await resolve_shared_embedding_text(payload)
