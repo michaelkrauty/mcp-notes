@@ -15,7 +15,7 @@ from vector_core.storage.embedding_migration import (
     resolve_shared_embedding_text,
 )
 
-from mcp_notes.indexing.chunker import chunk_note
+from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.storage.parser import ParsedNote, parse_note
 
 if TYPE_CHECKING:
@@ -43,14 +43,26 @@ class NotesMigration:
             self._notes = self._snapshot()
         return self._notes
 
+    def _owns_note(self, note_id: UUID) -> bool:
+        path = self.indexer.note_store.get_note_path(note_id)
+        root = self.indexer.note_store.notes_dir
+        if path is None or not path.is_relative_to(root):
+            return False
+        # The configured root may itself be a symlink. Only entries beneath
+        # that root are excluded, matching the source snapshot's traversal.
+        return not any(
+            part.is_symlink()
+            for part in (path, *path.parents)
+            if part != root and part.is_relative_to(root)
+        )
+
     async def resolve_text(self, payload: dict[str, Any]) -> str | None:
         point_type = payload.get("type")
-        if point_type == "note" or (point_type == "chunk" and "embedding_text" not in payload):
+        if point_type in {"note", "chunk"}:
             note_id = UUID(payload["note_id"])
             # Shared collections can contain notes owned by another directory.
             # Absence from this store is not evidence that those notes were deleted.
-            path = self.indexer.note_store.get_note_path(note_id)
-            if path is None or any(part.is_symlink() for part in (path, *path.parents)):
+            if not self._owns_note(note_id):
                 return await resolve_shared_embedding_text(payload)
             source = self._source_notes().get(note_id)
             if source is None or (
@@ -67,13 +79,14 @@ class NotesMigration:
                 if (
                     isinstance(index, int)
                     and 0 <= index < len(texts)
-                    and texts[index] == payload.get("content")
+                    and texts[index] == payload.get("embedding_text", payload.get("content"))
                 ):
                     return texts[index]
                 # Truncation and changed chunk boundaries are indistinguishable
                 # from retained text alone. Rebuild the complete source group.
                 self._rebuild_ids.add(note_id)
                 return None
+            return generate_note_summary(source[0])
         return await resolve_shared_embedding_text(payload)
 
     def _snapshot(self) -> dict[UUID, tuple[ParsedNote, str | None]]:
@@ -101,6 +114,21 @@ class NotesMigration:
         return notes
 
     async def finalize(self, physical_name: str) -> None:
+        # Core can copy points with retained embedding_text without invoking
+        # our resolver. Reconcile those too, including orphan chunks left by
+        # an interrupted index, before publishing the candidate.
+        payloads = await self.indexer.storage.scroll_points(physical_name, max_results=0)
+        summaries: set[UUID] = set()
+        chunks: set[UUID] = set()
+        for payload in payloads:
+            if payload.get("type") not in {"note", "chunk"}:
+                continue
+            note_id = UUID(payload["note_id"])
+            if not self._owns_note(note_id):
+                continue
+            (summaries if payload["type"] == "note" else chunks).add(note_id)
+            await self.resolve_text(payload)
+        self._rebuild_ids.update(chunks - summaries)
         if not self._rebuild_ids:
             return
         # Complete the scan before changing candidate points. Unlike iter_all,

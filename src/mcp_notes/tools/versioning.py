@@ -75,6 +75,7 @@ async def restore_note_version(
     git = get_git()
     indexer = await get_indexer()
 
+    await prepare_collection_mutation()
     # Get title and current path
     try:
         note = store.read(uuid)
@@ -85,7 +86,6 @@ async def restore_note_version(
         current_path = None
 
     # Restore via git with current path
-    await prepare_collection_mutation()
     commit_sha = git.restore_version(uuid, version_id, title, current_path=current_path)
     if not commit_sha:
         if git.is_note_deleted_at(uuid, version_id):

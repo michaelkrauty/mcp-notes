@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from qdrant_client import AsyncQdrantClient
@@ -20,7 +21,7 @@ from vector_core.storage.embedding_migration import (
     resolve_shared_embedding_text,
 )
 
-from mcp_notes.indexing.chunker import chunk_note
+from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.indexing.indexer import NoteIndexer
 from mcp_notes.indexing.migration import NotesMigration, ensure_notes_collection
 from mcp_notes.search.engine import NoteSearchEngine
@@ -130,6 +131,105 @@ async def test_same_dimension_model_change_preserves_mixed_sparse_and_sources(co
         assert migrated[point_id].vector["dense"] != record.vector["dense"]
     assert await points(indexer, indexer.logical_collection_name) == original
     assert indexer.note_store.read(note.id).content == source
+    assert migrated[generate_point_id(f"note:{note.id}")].payload[
+        "embedding_text"
+    ] == generate_note_summary(parse_note(source))
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_symlinked_source_root_reconciles_owned_notes(corpus, deleted):
+    indexer, note = corpus
+    root = indexer.note_store.notes_dir
+    target = root.with_name("real-notes")
+    root.rename(target)
+    root.symlink_to(target, target_is_directory=True)
+    if deleted:
+        indexer.note_store.get_note_path(note.id).unlink()
+    else:
+        indexer.note_store.update(note.id, content="Changed under symlinked root")
+    generation = await ensure_notes_collection(indexer)
+    result = await points(indexer, generation.physical_name)
+    summary_id = generate_point_id(f"note:{note.id}")
+    if deleted:
+        assert summary_id not in result
+    else:
+        assert "Changed under symlinked root" in result[summary_id].payload["embedding_text"]
+
+
+async def test_symlink_entry_below_root_keeps_retained_fallback(corpus):
+    indexer, note = corpus
+    path = indexer.note_store.get_note_path(note.id)
+    target = indexer.note_store.base_dir / "external.md"
+    path.rename(target)
+    path.symlink_to(target)
+    original = await points(indexer, indexer.logical_collection_name)
+    generation = await ensure_notes_collection(indexer)
+    result = await points(indexer, generation.physical_name)
+    assert result.keys() == original.keys()
+    assert (
+        result[generate_point_id(f"note:{note.id}")].payload["embedding_text_source"]
+        == "legacy-note-metadata"
+    )
+
+
+@pytest.mark.parametrize("change", ["edit", "delete", "unchanged"])
+async def test_modern_orphan_chunks_reconcile_owned_source(corpus, change):
+    indexer, note = corpus
+    await indexer._index_note(parse_note(note.content), None)
+    client = await indexer.storage.get_client()
+    await client.delete(
+        indexer.logical_collection_name,
+        points_selector=[generate_point_id(f"note:{note.id}")],
+        wait=True,
+    )
+    if change == "delete":
+        indexer.note_store.get_note_path(note.id).unlink()
+    elif change == "edit":
+        indexer.note_store.update(note.id, content="Edited orphan source")
+    generation = await ensure_notes_collection(indexer)
+    result = await points(indexer, generation.physical_name)
+    owned = [
+        point.payload for point in result.values() if point.payload.get("note_id") == str(note.id)
+    ]
+    if change == "delete":
+        assert not owned
+    else:
+        assert {payload["type"] for payload in owned} == {"note", "chunk"}
+        if change == "edit":
+            assert all("Edited orphan source" in payload["embedding_text"] for payload in owned)
+
+
+async def test_restore_reads_current_path_only_after_mutation_lock(monkeypatch):
+    locked = False
+
+    @asynccontextmanager
+    async def operation():
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    def read_note(*args):
+        assert locked
+        return SimpleNamespace(title="Current")
+
+    def current_path(*args):
+        assert locked
+
+    indexer = SimpleNamespace(collection_operation=operation)
+    getter = AsyncMock(return_value=indexer)
+    store = SimpleNamespace(read=read_note, get_note_path=current_path)
+    git = MagicMock()
+    git.restore_version.return_value = None
+    git.is_note_deleted_at.return_value = False
+    monkeypatch.setattr(mutation, "get_indexer", getter)
+    monkeypatch.setattr(versioning, "get_indexer", getter)
+    monkeypatch.setattr(versioning, "get_store", lambda: store)
+    monkeypatch.setattr(versioning, "get_git", lambda: git)
+    await versioning.restore_note_version(str(uuid4()), "version")
+    assert not locked
 
 
 async def test_external_edit_rebuilds_whole_group_without_stale_chunks(corpus):
