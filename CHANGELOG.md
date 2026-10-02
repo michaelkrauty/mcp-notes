@@ -19,6 +19,7 @@
 - Default note/chunk and mixed all-types searches group fragments by original source record and retain markerless legacy candidates. Mixed searches validate canonical entity lineage before hydrating winning display fields.
 - Similar-note lookup queries every source vector with bounded concurrency, cancels and joins a failed query batch, and hydrates only final winners.
 - Embedding migrations preserve complete retained note groups when their original files or source directory are unavailable. Legacy metadata-only summaries without a reconstructable body fail explicitly and leave the active generation intact; missing files do not imply deletion.
+- Tests initialize session-owned cache, vocabulary, shared-store, and note paths before settings imports, replacing ambient data paths and cleaning them on exit. Subprocess tests inherit isolation, and service endpoints require explicit configuration.
 
 ## [1.2.1] - 2026-10-01
 

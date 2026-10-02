@@ -47,6 +47,7 @@ def isolated_embedder(capacity, namespace="first"):
 @pytest.fixture
 async def notes_index(tmp_path, monkeypatch):
     monkeypatch.setattr(vector_settings, "collection_name", None)
+    monkeypatch.setattr(vector_settings, "cache_dir", tmp_path / "cache")
     monkeypatch.setattr(settings, "max_chunk_chars", 100000)
     monkeypatch.setattr(settings, "section_overlap_chars", 0)
     store = NoteStore(tmp_path / "source")
