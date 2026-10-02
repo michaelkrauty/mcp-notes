@@ -537,9 +537,10 @@ class NoteIndexer:
         """Get current index status."""
         total_notes = self.note_store.count()
 
+        indexed: dict[str, str] = {}
         try:
             indexed = await self._get_indexed_hashes()
-            indexed_notes = len(indexed)
+            indexed_notes = sum(bool(note_hash) for note_hash in indexed.values())
         except Exception as e:
             logger.debug(f"Could not get indexed count: {e}")
             indexed_notes = 0
@@ -555,7 +556,7 @@ class NoteIndexer:
             total_notes=total_notes,
             indexed_notes=indexed_notes,
             last_indexed=None,  # Would need to track this
-            index_healthy=exists and indexed_notes > 0,
+            index_healthy=exists and indexed_notes > 0 and indexed_notes == len(indexed),
         )
 
     async def close(self) -> None:

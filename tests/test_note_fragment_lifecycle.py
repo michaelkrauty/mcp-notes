@@ -158,8 +158,12 @@ async def test_source_policy_only_change_reindexes_unchanged_note(notes_index, m
     assert indexer._hash_note(parsed, None) == source_hash
     async with indexer.collection_operation():
         assert (await indexer._get_indexed_hashes())[str(note.id)] != source_hash
+    status = await indexer.get_status()
+    assert status.indexed_notes == 0
+    assert status.index_healthy is False
     status = await indexer.index_all()
     assert status.index_healthy
+    assert (await indexer.get_status()).indexed_notes == 1
     generation = await ensure_notes_collection(indexer)
     result = await payloads(indexer, generation.physical_name)
     summaries = [p for p in result if p["type"] == "note" and not is_derived_fragment(p)]
@@ -204,10 +208,16 @@ async def test_partial_note_write_remains_pending_and_incremental_retry_repairs(
     assert summary["note_hash"] == summary["index_policy"] == ""
     async with indexer.collection_operation():
         assert (await indexer._get_indexed_hashes())[str(note.id)] == ""
+    status = await indexer.get_status()
+    assert status.indexed_notes == 0
+    assert status.index_healthy is False
 
     monkeypatch.setattr(indexer_module, "upsert_fragment_group", original_write)
     monkeypatch.setattr(indexer, "_delete_orphan_chunks", original_cleanup)
     assert (await indexer.index_all()).index_healthy
+    status = await indexer.get_status()
+    assert status.indexed_notes == 1
+    assert status.index_healthy is True
     repaired = await payloads(indexer, generation.physical_name)
     summary = next(p for p in repaired if p["type"] == "note" and not is_derived_fragment(p))
     assert summary["note_hash"] == indexer._hash_note(parsed, None)

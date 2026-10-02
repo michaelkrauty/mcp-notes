@@ -524,8 +524,8 @@ class TestNoteIndexerGetStatus:
         mock_storage = AsyncMock()
         mock_storage.collection_exists.return_value = True
         mock_storage.scroll_points.return_value = [
-            {"note_id": "1", "note_hash": "h1"},
-            {"note_id": "2", "note_hash": "h2"},
+            {"note_id": "1", "note_hash": "h1", "index_policy": NoteIndexer._index_policy()},
+            {"note_id": "2", "note_hash": "h2", "index_policy": NoteIndexer._index_policy()},
         ]
 
         indexer = NoteIndexer(
@@ -539,6 +539,25 @@ class TestNoteIndexerGetStatus:
         assert status.total_notes == 5
         assert status.indexed_notes == 2
         assert status.index_healthy is True
+
+    @pytest.mark.parametrize(
+        "incomplete", [{"source_reindex_pending": True}, {"index_policy": "old"}]
+    )
+    async def test_incomplete_note_is_not_counted_or_reported_healthy(self, incomplete):
+        store = MagicMock(base_dir=Path("/isolated/notes"))
+        store.count.return_value = 2
+        storage = AsyncMock()
+        storage.collection_exists.return_value = True
+        current = {"note_hash": "complete", "index_policy": NoteIndexer._index_policy()}
+        storage.scroll_points.return_value = [
+            {"note_id": "complete", **current},
+            {"note_id": "retry", **current, **incomplete},
+        ]
+        indexer = NoteIndexer(note_store=store, storage=storage, embedder=MagicMock())
+        assert (await indexer._get_indexed_hashes())["retry"] == ""
+        status = await indexer.get_status()
+        assert status.indexed_notes == 1
+        assert status.index_healthy is False
 
     @pytest.mark.asyncio
     async def test_status_unhealthy_no_collection(self):
