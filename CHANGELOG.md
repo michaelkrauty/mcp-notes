@@ -13,7 +13,7 @@
 
 - Highlights can inspect retained searchable text beyond the previous payload excerpt limit. Source-backed embedding migrations rebuild changed chunk layouts and ignore derived fragment children during source reconciliation.
 - Note hashes and indexing-policy markers become current only after passage writes and orphan cleanup complete. Failed new-note or existing-note writes remain pending and are retried by incremental indexing.
-- Public index status counts only completed current-policy notes and reports pending or policy-mismatched entries as unhealthy without removing them from the incremental retry map.
+- Public index status counts only completed current-policy notes and reports pending or policy-mismatched entries as unhealthy without removing them from the incremental retry map. Bulk indexing remains unhealthy while retained incomplete groups lack readable source, including no-work passes and passes that successfully index other notes.
 - Filter-only listings exclude derived embedding fragments before pagination, returning canonical records without duplicate notes or fragment-starved candidate limits.
 - Explicit fact and glossary searches group complete passage matches by entity, including sparse-only fallback. Winning tail fragments hydrate canonical display fields while preserving their actual snippet highlights.
 - Default note/chunk and mixed all-types searches group fragments by original source record and retain markerless legacy candidates. Mixed searches validate canonical entity lineage before hydrating winning display fields.

@@ -228,6 +228,58 @@ async def test_partial_note_write_remains_pending_and_incremental_retry_repairs(
     assert "".join(parsed.body[p["start_char"] : p["end_char"]] for p in chunks) == parsed.body
 
 
+@pytest.mark.parametrize("incomplete", ["partial_write", "policy"])
+@pytest.mark.parametrize("present", [False, True])
+async def test_bulk_health_retains_missing_source_pending_state(
+    notes_index, monkeypatch, incomplete, present
+):
+    indexer, note = notes_index
+    path = indexer.note_store.get_note_path(note.id)
+    source = path.read_text()
+    cleanup = indexer._delete_orphan_chunks
+    if incomplete == "partial_write":
+
+        async def fail_cleanup(*args):
+            raise RuntimeError("injected cleanup failure")
+
+        monkeypatch.setattr(indexer, "_delete_orphan_chunks", fail_cleanup)
+        with pytest.raises(RuntimeError, match="injected"):
+            await indexer.index_note(note.id)
+        monkeypatch.setattr(indexer, "_delete_orphan_chunks", cleanup)
+    else:
+        await indexer.index_note(note.id)
+        monkeypatch.setattr(settings, "max_chunk_chars", 180)
+    generation = await ensure_notes_collection(indexer)
+    retained = [
+        p
+        for p in await payloads(indexer, generation.physical_name)
+        if p.get("note_id") == str(note.id)
+    ]
+    path.unlink()
+    if present:
+        other = indexer.note_store.create("Available", "AVAILABLE_TAIL complete source")
+    status = await indexer.index_all()
+    assert status.index_healthy is False
+    assert status.indexed_notes == int(present)
+    async with indexer.collection_operation():
+        hashes = await indexer._get_indexed_hashes()
+    assert hashes[str(note.id)] == ""
+    if present:
+        assert hashes[str(other.id)]
+    assert [
+        p
+        for p in await payloads(indexer, generation.physical_name)
+        if p.get("note_id") == str(note.id)
+    ] == retained
+    # A second no-work pass must still report the unresolved retained group.
+    assert (await indexer.index_all()).index_healthy is False
+    path.write_text(source)
+    repaired = await indexer.index_all()
+    assert repaired.index_healthy is True
+    assert repaired.indexed_notes == 1 + int(present)
+    assert (await indexer.get_status()).index_healthy is True
+
+
 async def test_filter_only_notes_exclude_children_before_candidate_limit(notes_index):
     indexer, note = notes_index
     other = indexer.note_store.create("Other", "Other body")

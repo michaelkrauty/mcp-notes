@@ -204,6 +204,8 @@ class NoteIndexer:
             for note_id in owned:
                 await self._delete_note_points(note_id)
 
+        pending = {note_id for note_id, note_hash in indexed.items() if not note_hash}
+
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)
         notes_to_index: list[tuple[ParsedNote, str | None]] = []
@@ -234,7 +236,7 @@ class NoteIndexer:
                 total_notes=total_notes,
                 indexed_notes=total_notes,
                 last_indexed=datetime.now(UTC),
-                index_healthy=True,
+                index_healthy=not pending,
             )
 
         # Pass 2: Index notes with embeddings and sparse vectors
@@ -249,6 +251,7 @@ class NoteIndexer:
                     # owned groups were cleared, so no orphans are possible.
                     await self._delete_orphan_chunks(parsed.id, new_chunk_count)
                 await self._complete_note_index(parsed, category)
+                pending.discard(str(parsed.id))
                 indexed_count += 1
             except Exception as e:
                 logger.error(f"Failed to index note {parsed.id}: {e}")
@@ -261,7 +264,7 @@ class NoteIndexer:
         # needed indexing succeeded.
         previously_indexed = total_notes - len(notes_to_index)
         indexed_notes = previously_indexed + indexed_count
-        index_healthy = indexed_count == len(notes_to_index)
+        index_healthy = indexed_count == len(notes_to_index) and not pending
         if not index_healthy:
             logger.warning(
                 f"Indexing incomplete: {indexed_count}/{len(notes_to_index)} "
