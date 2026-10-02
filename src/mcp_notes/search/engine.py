@@ -1,8 +1,10 @@
 """Search engine for notes using hybrid search."""
 
+import asyncio
 import logging
 import re
-from typing import Literal
+from collections.abc import Sequence
+from typing import Literal, cast
 from uuid import UUID
 
 from qdrant_client.models import (
@@ -10,9 +12,13 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    IsEmptyCondition,
     MatchAny,
     MatchValue,
+    PayloadField,
     Prefetch,
+    Range,
+    ScoredPoint,
 )
 from qdrant_client.models import (
     SparseVector as QdrantSparseVector,
@@ -21,12 +27,16 @@ from vector_core import (
     EmbeddingClient,
     QdrantStorage,
     generate_collection_name,
-    generate_point_id,
     parse_iso_datetime,
 )
 from vector_core.embeddings.client import CircuitBreakerOpenError
 from vector_core.embeddings.global_vocab import GlobalVocabulary
+from vector_core.embeddings.sparse import SparseVector
+from vector_core.search.rank_fusion import reciprocal_rank_fusion
+from vector_core.storage.embedding_fragments import fragment_marker
 from vector_core.storage.embedding_migration import active_embedding_collection
+from vector_core.storage.hybrid import HybridSearcher
+from vector_core.storage.hybrid import SearchResult as HybridResult
 
 from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
 from mcp_notes.indexing.migration import ensure_notes_collection
@@ -198,46 +208,89 @@ class NoteSearchEngine:
 
         # Build Qdrant filters first (shared between hybrid and sparse-only)
         qdrant_filters = filters_to_qdrant(filters)
+        rollup_notes = type_filter == "note" or (mode == "note" and type_filter in {None, "all"})
+        group_by = (
+            "note_id"
+            if rollup_notes
+            else {"fact": "fact_id", "glossary": "glossary_id"}.get(type_filter or "")
+        )
+        if type_filter == "all" and mode == "both":
+            group_by = "embedding_fragment.parent_id"
 
-        # Add type filter - type_filter takes precedence over mode
-        if type_filter == "glossary":
-            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="glossary")))
-        elif type_filter == "fact":
-            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="fact")))
-        elif type_filter == "note":
-            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
-        elif type_filter == "chunk":
-            qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="chunk")))
-        elif type_filter is None or type_filter == "all":
-            # Use mode for notes/chunks filtering
-            if mode == "note":
-                qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="note")))
-            elif mode == "chunk":
-                qdrant_filters.append(FieldCondition(key="type", match=MatchValue(value="chunk")))
-            elif type_filter is None:  # mode == "both", the search_notes default
-                # Restrict to note + chunk. Glossary entries and facts live in
-                # the same collection, so without this they leak into note
-                # results; they have dedicated search_glossary/search_facts
-                # tools and require an explicit type_filter. Mirrors the
-                # note/chunk scoping _filter_only_search applies on the
-                # no-query path. An explicit type_filter="all" intentionally
-                # falls through with no type restriction (all types).
-                qdrant_filters.append(
-                    FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))
-                )
+        qdrant_filters.extend(self._semantic_type_filters(mode, type_filter))
 
         # Add domain filter for glossary
         if domain:
             qdrant_filters.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
 
-        query_filter = Filter(must=qdrant_filters) if qdrant_filters else None
-
-        # Get Qdrant client and set up search parameters
-        client = await self.storage.get_client()
-
         # Fetch extra results to account for post-filtering (date ranges, exclude_tags)
         # Use 3x multiplier + buffer to handle cases where many results are filtered
         fetch_limit = max(limit * 3, limit + 20)
+        point_list, degraded = await self._query_hits(
+            collection, filters.query, qdrant_filters, fetch_limit, group_by, readiness_error
+        )
+        winners = self._select_winners(point_list, filters, limit)
+        display_payloads = await self._entity_display_payloads(collection, winners)
+
+        results = []
+        for point in winners:
+            payload = point.payload or {}
+            content = (
+                payload.get("content")
+                or payload.get("embedding_text")
+                or payload.get("definition", "")
+            )
+            highlights = self._extract_highlights(content, filters.query) if content else []
+            if rollup_notes:
+                payload = {**payload, "type": "note"}
+            payload = display_payloads.get(point.id, payload)
+            result = convert_payload(payload, point.score or 0.0, highlights, degraded)
+            if result is None:
+                continue
+            results.append(result)
+        return results
+
+    @staticmethod
+    def _select_winners(
+        points: Sequence[ScoredPoint | HybridResult], filters: SearchFilters, limit: int
+    ) -> list[ScoredPoint | HybridResult]:
+        winners = []
+        for point in points:
+            payload = point.payload or {}
+            if payload.get("type", "note") not in {"fact", "glossary"} and not apply_post_filters(
+                [{"payload": payload, "score": point.score}], filters
+            ):
+                continue
+            if convert_payload(payload, point.score or 0.0) is not None:
+                winners.append(point)
+            if len(winners) >= limit:
+                break
+        return winners
+
+    @staticmethod
+    def _semantic_type_filters(mode: str, type_filter: str | None) -> list[FieldCondition]:
+        if type_filter is not None and type_filter in {"glossary", "fact", "chunk"}:
+            return [FieldCondition(key="type", match=MatchValue(value=type_filter))]
+        if type_filter == "note" or mode == "note":
+            return [FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))]
+        if mode == "chunk":
+            return [FieldCondition(key="type", match=MatchValue(value="chunk"))]
+        if type_filter is None:
+            return [FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))]
+        return []
+
+    async def _query_hits(
+        self,
+        collection: str,
+        query: str,
+        conditions: list[FieldCondition],
+        fetch_limit: int,
+        group_by: str | None,
+        readiness_error: CircuitBreakerOpenError | None,
+    ) -> tuple[Sequence[ScoredPoint | HybridResult], bool]:
+        """Query complete passages, grouping distinct entities before fusion when requested."""
+        query_filter = Filter(must=list(conditions)) if conditions else None
+        client = await self.storage.get_client()
 
         # The per-modality prefetch pool must be at least as large as the
         # post-fusion fetch_limit. Otherwise a large limit is silently capped at
@@ -248,35 +301,53 @@ class NoteSearchEngine:
 
         # Try hybrid search with graceful degradation to sparse-only
         degraded = False
-        sparse_vector = self.global_vocab.vectorize_query(filters.query)
+        sparse_vector = self.global_vocab.vectorize_query(query)
+        point_list: Sequence[ScoredPoint | HybridResult]
 
         try:
             # Get dense embeddings for hybrid search
-            dense_vector = await self._embed_query(filters.query, readiness_error)
+            dense_vector = await self._embed_query(query, readiness_error)
 
             # Perform hybrid search with RRF fusion
-            points = await client.query_points(
-                collection,
-                prefetch=[
-                    Prefetch(
-                        query=QdrantSparseVector(
-                            indices=sparse_vector.indices,
-                            values=sparse_vector.values,
+            if group_by:
+                if group_by == "embedding_fragment.parent_id":
+                    return await self._source_query_hits(
+                        collection, conditions, sparse_vector, dense_vector, fetch_limit
+                    ), False
+                point_list = await HybridSearcher(
+                    self.storage, dense_weight=1.0, sparse_weight=1.0
+                ).search(
+                    collection=collection,
+                    dense_query=dense_vector,
+                    sparse_query=sparse_vector,
+                    limit=fetch_limit,
+                    filter_conditions=conditions,
+                    group_by=group_by,
+                )
+            else:
+                points = await client.query_points(
+                    collection,
+                    prefetch=[
+                        Prefetch(
+                            query=QdrantSparseVector(
+                                indices=sparse_vector.indices,
+                                values=sparse_vector.values,
+                            ),
+                            using="sparse",
+                            limit=prefetch_limit,
+                            filter=query_filter,
                         ),
-                        using="sparse",
-                        limit=prefetch_limit,
-                        filter=query_filter,
-                    ),
-                    Prefetch(
-                        query=dense_vector,
-                        using="dense",
-                        limit=prefetch_limit,
-                        filter=query_filter,
-                    ),
-                ],
-                query=FusionQuery(fusion=Fusion.RRF),
-                limit=fetch_limit,
-            )
+                        Prefetch(
+                            query=dense_vector,
+                            using="dense",
+                            limit=prefetch_limit,
+                            filter=query_filter,
+                        ),
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=fetch_limit,
+                )
+                point_list = points.points
         except CircuitBreakerOpenError as e:
             # Embedding service unavailable - fall back to sparse-only search
             logger.warning(
@@ -284,46 +355,167 @@ class NoteSearchEngine:
             )
             degraded = True
 
-            points = await client.query_points(
-                collection,
-                query=QdrantSparseVector(
-                    indices=sparse_vector.indices,
-                    values=sparse_vector.values,
+            if group_by:
+                if group_by == "embedding_fragment.parent_id":
+                    return await self._source_query_hits(
+                        collection, conditions, sparse_vector, None, fetch_limit
+                    ), True
+                grouped_response = await client.query_points_groups(
+                    collection,
+                    query=QdrantSparseVector(
+                        indices=sparse_vector.indices, values=sparse_vector.values
+                    ),
+                    using="sparse",
+                    group_by=group_by,
+                    group_size=1,
+                    limit=fetch_limit,
+                    query_filter=query_filter,
+                )
+                point_list = [hit for group in grouped_response.groups for hit in group.hits]
+            else:
+                points = await client.query_points(
+                    collection,
+                    query=QdrantSparseVector(
+                        indices=sparse_vector.indices,
+                        values=sparse_vector.values,
+                    ),
+                    using="sparse",
+                    limit=fetch_limit,
+                    query_filter=query_filter,
+                )
+                point_list = points.points
+
+        return point_list, degraded
+
+    async def _source_query_hits(
+        self,
+        collection: str,
+        conditions: list[FieldCondition],
+        sparse_vector: SparseVector,
+        dense_vector: list[float] | None,
+        limit: int,
+    ) -> list[HybridResult]:
+        """Group modern source fragments while keeping markerless legacy records searchable."""
+        client = await self.storage.get_client()
+        missing_parent = IsEmptyCondition(is_empty=PayloadField(key="embedding_fragment.parent_id"))
+
+        async def modality(
+            query: list[float] | QdrantSparseVector, using: str
+        ) -> list[ScoredPoint]:
+            grouped, legacy = await asyncio.gather(
+                client.query_points_groups(
+                    collection,
+                    query=query,
+                    using=using,
+                    group_by="embedding_fragment.parent_id",
+                    group_size=1,
+                    limit=limit,
+                    query_filter=Filter(must=list(conditions)),
                 ),
-                using="sparse",
-                limit=fetch_limit,
-                query_filter=query_filter,
+                client.query_points(
+                    collection,
+                    query=query,
+                    using=using,
+                    limit=limit,
+                    query_filter=Filter(must=[*conditions, missing_parent]),
+                ),
             )
+            hits = [hit for group in grouped.groups for hit in group.hits]
+            return sorted([*hits, *legacy.points], key=lambda hit: hit.score, reverse=True)[:limit]
 
-        # Convert to results with post-filtering
-        results = []
-        for point in points.points:
-            payload = point.payload or {}
-            point_type = payload.get("type", "note")
+        queries = []
+        if dense_vector is not None:
+            queries.append(modality(dense_vector, "dense"))
+        queries.append(
+            modality(
+                QdrantSparseVector(indices=sparse_vector.indices, values=sparse_vector.values),
+                "sparse",
+            )
+        )
+        ranked = await asyncio.gather(*queries)
 
-            # Apply post-filters (glossary/fact use domain filter, not tag/date filters)
-            if point_type not in ("glossary", "fact"):
-                result_dict = {"payload": payload, "score": point.score}
-                if not apply_post_filters([result_dict], filters):
-                    continue
+        def source_id(point: ScoredPoint) -> int | str | UUID:
+            marker = fragment_marker(point.payload or {})
+            return marker["parent_id"] if marker else point.id
 
-            # Extract highlights from searchable content
-            highlights = []
-            content = payload.get("content") or payload.get("definition", "")
-            if content and filters.query:
-                highlights = self._extract_highlights(content, filters.query)
+        if dense_vector is None:
+            return [
+                HybridResult(id=cast(int | str, hit.id), score=hit.score, payload=hit.payload or {})
+                for hit in ranked[0]
+            ]
+        fused = reciprocal_rank_fusion(ranked, key=source_id, limit=limit)
+        return [
+            HybridResult(
+                id=cast(int | str, result.item.id),
+                score=result.score,
+                payload=result.item.payload or {},
+            )
+            for result in fused
+        ]
 
-            # Convert payload to SearchResult using unified converter
-            result = convert_payload(payload, point.score or 0.0, highlights, degraded)
-            if result is None:
+    async def _entity_display_payloads(
+        self, collection: str, winners: Sequence[ScoredPoint | HybridResult]
+    ) -> dict[int | str | UUID, dict]:
+        """Hydrate canonical entity fields once while retaining each winning dense snippet."""
+        parents = {}
+        for point in winners:
+            if (point.payload or {}).get("type") not in {"fact", "glossary"}:
                 continue
-
-            results.append(result)
-
-            if len(results) >= limit:
-                break
-
-        return results
+            marker = fragment_marker(point.payload or {})
+            if marker is not None and marker["index"] > 0:
+                parents[point.id] = marker["parent_id"]
+        if not parents:
+            return {}
+        client = await self.storage.get_client()
+        records = await client.retrieve(
+            collection,
+            ids=list(set(parents.values())),
+            with_vectors=False,
+            with_payload=[
+                "type",
+                "fact_id",
+                "subject",
+                "predicate",
+                "object",
+                "subject_type",
+                "object_type",
+                "context",
+                "created",
+                "modified",
+                "glossary_id",
+                "term",
+                "expansion",
+                "definition",
+                "domain",
+                "embedding_fragment",
+            ],
+        )
+        canonical = {record.id: record.payload or {} for record in records}
+        hydrated = {}
+        for point in winners:
+            if point.id not in parents:
+                continue
+            parent = canonical.get(parents[point.id])
+            if parent is None:
+                raise ValueError("Winning embedding fragment has no canonical entity")
+            child = point.payload or {}
+            marker = fragment_marker(child)
+            parent_marker = fragment_marker(parent)
+            entity_key = f"{child['type']}_id"
+            if (
+                marker is None
+                or parent_marker is None
+                or parent_marker["index"] != 0
+                or parent_marker["parent_id"] != parents[point.id]
+                or parent_marker["source_hash"] != marker["source_hash"]
+                or parent.get("type") != child["type"]
+                or not child.get(entity_key)
+                or parent.get(entity_key) != child[entity_key]
+            ):
+                raise ValueError("Winning embedding fragment has no matching canonical source")
+            display = {key: value for key, value in parent.items() if key != "embedding_fragment"}
+            hydrated[point.id] = {**child, **display}
+        return hydrated
 
     async def _filter_only_search(
         self,
@@ -362,7 +554,14 @@ class NoteSearchEngine:
 
         points = await self.storage.scroll_points(
             collection,
-            filter_conditions=qdrant_filters if qdrant_filters else None,
+            filter_conditions=[
+                *qdrant_filters,
+                Filter(
+                    must_not=[
+                        FieldCondition(key="embedding_fragment.index", range=Range(gt=0)),
+                    ]
+                ),
+            ],
             limit=fetch_limit,
         )
 
@@ -453,65 +652,64 @@ class NoteSearchEngine:
             List of similar notes (excluding the source)
         """
         collection, _ = await self._readable_collection()
-        # Get the source note's embedding
         client = await self.storage.get_client()
-
-        # Find the note's vector using deterministic point ID
-        point_key = f"note:{note_id}"
-        point_id = generate_point_id(point_key)
-
-        try:
-            points = await client.retrieve(
-                collection,
-                ids=[point_id],
-                with_vectors=True,
-            )
-        except Exception as e:
-            logger.debug(f"Failed to retrieve vector for similar notes lookup: {e}")
-            return []
-
-        if not points or not points[0].vector:
-            return []
-
-        vector = points[0].vector
-        if not isinstance(vector, dict):
-            return []
-        dense_vector = vector.get("dense", [])
-        if not dense_vector:
-            return []
-
-        # Search for similar notes
-        response = await client.query_points(
-            collection,
-            query=dense_vector,
-            using="dense",
-            limit=limit + 1,  # +1 to exclude self
-            query_filter=Filter(
-                must=[
-                    FieldCondition(key="type", match=MatchValue(value="note")),
-                ],
-            ),
+        source_filter = Filter(
+            must=[
+                FieldCondition(key="note_id", match=MatchValue(value=str(note_id))),
+                FieldCondition(key="type", match=MatchValue(value="chunk")),
+            ]
         )
-
-        results = []
-        for point in response.points:
-            payload = point.payload or {}
-            result_note_id = payload.get("note_id", "")
-
-            # Skip self
-            if result_note_id == str(note_id):
-                continue
-
-            # Convert using unified converter
-            result = convert_payload(payload, point.score or 0.0)
-            if result is None:
-                continue
-
-            results.append(result)
-
-            if len(results) >= limit:
+        target_filter = Filter(
+            must=[FieldCondition(key="type", match=MatchValue(value="chunk"))],
+            must_not=[FieldCondition(key="note_id", match=MatchValue(value=str(note_id)))],
+        )
+        best: dict[int | str, tuple[int | str | UUID, float]] = {}
+        offset = None
+        while True:
+            sources, offset = await client.scroll(
+                collection,
+                scroll_filter=source_filter,
+                offset=offset,
+                limit=128,
+                with_vectors=["dense"],
+                with_payload=False,
+            )
+            for source in sources:
+                vector = source.vector
+                if not isinstance(vector, dict) or not vector.get("dense"):
+                    raise ValueError("Indexed note chunk has no dense vector")
+                response = await client.query_points_groups(
+                    collection,
+                    query=vector["dense"],
+                    using="dense",
+                    group_by="note_id",
+                    group_size=1,
+                    limit=limit,
+                    query_filter=target_filter,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                for group in response.groups:
+                    for hit in group.hits:
+                        if group.id not in best or hit.score > best[group.id][1]:
+                            best[group.id] = (hit.id, hit.score)
+            if offset is None:
                 break
-
+        winners = sorted(best.values(), key=lambda hit: hit[1], reverse=True)[:limit]
+        if not winners:
+            return []
+        records = await client.retrieve(
+            collection,
+            ids=[point_id for point_id, _ in winners],
+            with_payload=True,
+            with_vectors=False,
+        )
+        payloads = {record.id: record.payload or {} for record in records}
+        results = []
+        for point_id, score in winners:
+            result = convert_payload({**payloads.get(point_id, {}), "type": "note"}, score)
+            if result is not None:
+                results.append(result)
         return results
 
     async def close(self) -> None:

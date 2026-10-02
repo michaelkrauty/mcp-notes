@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from vector_core import generate_point_id
 from vector_core.storage.qdrant import QdrantStorage
 
 from mcp_notes.indexing.indexer import NoteIndexer
@@ -271,7 +270,7 @@ class TestNoteIndexerIndexAll:
         )
 
         # Second note fails to index; first and third succeed.
-        index_note = AsyncMock(side_effect=[None, RuntimeError("boom"), None])
+        index_note = AsyncMock(side_effect=[0, RuntimeError("boom"), 0])
         with (
             patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
             patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
@@ -307,7 +306,7 @@ class TestNoteIndexerIndexAll:
             patch("mcp_notes.indexing.indexer.generate_note_summary", return_value="s"),
             patch("mcp_notes.indexing.indexer.chunk_note", return_value=[]),
             patch.object(indexer, "_get_indexed_hashes", return_value={}),
-            patch.object(indexer, "_index_note", new=AsyncMock(return_value=None)),
+            patch.object(indexer, "_index_note", new=AsyncMock(return_value=0)),
         ):
             status = await indexer.index_all()
 
@@ -349,12 +348,11 @@ class TestNoteIndexerIndexAll:
         ):
             await indexer.index_all()
 
-        mock_storage.delete_points.assert_called_once()
-        _, ids_arg = mock_storage.delete_points.call_args[0]
-        assert ids_arg == [
-            generate_point_id(f"chunk:{note_id}:2"),
-            generate_point_id(f"chunk:{note_id}:3"),
-        ]
+        client = await mock_storage.get_client()
+        client.delete.assert_awaited_once()
+        deletion = client.delete.call_args.kwargs["points_selector"]
+        assert deletion.must[0].match.value == str(note_id)
+        assert deletion.must[2].range.gte == 2
 
     @pytest.mark.asyncio
     async def test_index_all_force_skips_orphan_pruning(self):
@@ -392,7 +390,7 @@ class TestNoteIndexerDeleteOrphanChunks:
 
     @pytest.mark.asyncio
     async def test_deletes_only_orphan_chunks(self):
-        """Chunks with index >= new_chunk_count are deleted by deterministic ID."""
+        """A scoped range deletes obsolete canonical chunks and their children."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         # spec=QdrantStorage guards against delete_points disappearing from
@@ -415,17 +413,17 @@ class TestNoteIndexerDeleteOrphanChunks:
         # New version keeps chunks 0 and 1; chunks 2 and 3 are orphans.
         await indexer._delete_orphan_chunks(note_id, new_chunk_count=2)
 
-        mock_storage.delete_points.assert_called_once()
-        collection_arg, ids_arg = mock_storage.delete_points.call_args[0]
-        assert collection_arg == indexer.collection_name
-        assert ids_arg == [
-            generate_point_id(f"chunk:{note_id}:2"),
-            generate_point_id(f"chunk:{note_id}:3"),
-        ]
+        client = await mock_storage.get_client()
+        client.delete.assert_awaited_once()
+        assert client.delete.call_args.args == (indexer.collection_name,)
+        deletion = client.delete.call_args.kwargs["points_selector"]
+        assert deletion.must[0].match.value == str(note_id)
+        assert deletion.must[1].match.value == "chunk"
+        assert deletion.must[2].range.gte == 2
 
     @pytest.mark.asyncio
-    async def test_no_delete_when_chunk_count_unchanged(self):
-        """No deletion request is made when there are no orphaned chunks."""
+    async def test_cleanup_failure_is_visible(self):
+        """A failed cleanup must not report a stale fragment group as healthy."""
         mock_store = MagicMock()
         mock_store.base_dir = Path("/home/user/notes")
         mock_storage = AsyncMock(spec=QdrantStorage)
@@ -440,9 +438,10 @@ class TestNoteIndexerDeleteOrphanChunks:
             embedder=MagicMock(),
         )
 
-        await indexer._delete_orphan_chunks(UUID(int=0), new_chunk_count=2)
-
-        mock_storage.delete_points.assert_not_called()
+        client = await mock_storage.get_client()
+        client.delete.side_effect = RuntimeError("cleanup failed")
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await indexer._delete_orphan_chunks(UUID(int=0), new_chunk_count=2)
 
 
 class TestNoteIndexerDeleteNoteIndex:
@@ -480,8 +479,8 @@ class TestNoteIndexerGetIndexedHashes:
         mock_store.base_dir = Path("/home/user/notes")
         mock_storage = AsyncMock()
         mock_storage.scroll_points.return_value = [
-            {"note_id": "uuid1", "note_hash": "hash1"},
-            {"note_id": "uuid2", "note_hash": "hash2"},
+            {"note_id": "uuid1", "note_hash": "hash1", "index_policy": NoteIndexer._index_policy()},
+            {"note_id": "uuid2", "note_hash": "hash2", "index_policy": NoteIndexer._index_policy()},
         ]
 
         indexer = NoteIndexer(

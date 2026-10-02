@@ -11,9 +11,11 @@ from uuid import UUID
 
 from qdrant_client.models import (
     FieldCondition,
+    Filter,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    Range,
 )
 from vector_core import (
     EmbeddingClient,
@@ -23,6 +25,11 @@ from vector_core import (
     generate_point_id,
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
+from vector_core.storage.embedding_fragments import (
+    fragment_point,
+    is_derived_fragment,
+    upsert_fragment_group,
+)
 from vector_core.storage.embedding_migration import (
     CollectionGeneration,
     embedding_collection_lock,
@@ -39,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Codebase ID for GlobalVocabulary registration
 NOTES_CODEBASE_ID = "notes"
+NOTE_INDEX_VERSION = "complete-spans-v1"
 
 
 class NoteIndexer:
@@ -214,7 +222,7 @@ class NoteIndexer:
             summary = generate_note_summary(parsed)
             tokens_per_doc.append(set(self.global_vocab.tokenize(summary)))
 
-            for chunk in chunk_note(parsed):
+            for chunk in chunk_note(parsed, self.embedder):
                 tokens_per_doc.append(set(self.global_vocab.tokenize(chunk.content)))
 
         # Register this codebase's vocabulary
@@ -240,6 +248,7 @@ class NoteIndexer:
                     # previous, larger version. Prune them. In force mode the
                     # owned groups were cleared, so no orphans are possible.
                     await self._delete_orphan_chunks(parsed.id, new_chunk_count)
+                await self._complete_note_index(parsed, category)
                 indexed_count += 1
             except Exception as e:
                 logger.error(f"Failed to index note {parsed.id}: {e}")
@@ -294,7 +303,7 @@ class NoteIndexer:
         category = note.category  # Category from path
 
         # Collect tokens for incremental vocabulary update
-        chunks = chunk_note(parsed)
+        chunks = chunk_note(parsed, self.embedder)
         summary = generate_note_summary(parsed)
 
         tokens_for_doc: list[set[str]] = [set(self.global_vocab.tokenize(summary))]
@@ -317,6 +326,7 @@ class NoteIndexer:
         # Delete orphaned chunks (old chunks beyond new chunk count)
         # This is safe because new chunks are already upserted
         await self._delete_orphan_chunks(note_id, new_chunk_count)
+        await self._complete_note_index(parsed, category)
 
     async def delete_note_index(self, note_id: UUID) -> None:
         """
@@ -338,28 +348,26 @@ class NoteIndexer:
         # via update_codebase_incremental() in index_note() or register_codebase() in index_all()
 
         # Generate chunks
-        chunks = chunk_note(parsed)
+        chunks = chunk_note(parsed, self.embedder)
 
         # Prepare texts for embedding
         texts = [c.content for c in chunks]
 
         # Add file-level summary
         summary = generate_note_summary(parsed)
-        texts.insert(0, summary)
-
         # Get embeddings
-        embeddings = await self.embedder.embed_all(texts)
+        embeddings = await self.embedder.embed_all(texts, role="document")
 
         # Prepare points
         points = []
 
         # File-level point - use category from path, not frontmatter
-        file_point = self._create_point(
-            point_type="note",
-            note_id=parsed.id,
-            chunk_index=None,
-            content=summary,
-            embedding=embeddings[0],
+        file_points = await fragment_point(
+            self.embedder,
+            point_id=generate_point_id(f"note:{parsed.id}"),
+            text=summary,
+            sparse=self.global_vocab.vectorize_document(summary),
+            vectorize=self.global_vocab.vectorize_document,
             payload={
                 "type": "note",
                 "note_id": str(parsed.id),
@@ -368,27 +376,21 @@ class NoteIndexer:
                 "category": category,  # From path, not frontmatter
                 "created": parsed.created.isoformat(),
                 "modified": parsed.modified.isoformat(),
-                "note_hash": self._hash_note(parsed, category),
-                "source_reindex_pending": False,
+                "note_hash": "",
+                "index_policy": "",
+                "source_reindex_pending": True,
+                "embedding_text": summary,
             },
         )
-        points.append(file_point)
 
         # Chunk points
         for i, chunk in enumerate(chunks):
-            # Warn if chunk content will be truncated in payload
-            if len(chunk.content) > settings.max_payload_content_chars:
-                logger.warning(
-                    f"Note {parsed.id} chunk {i} content truncated from "
-                    f"{len(chunk.content)} to {settings.max_payload_content_chars} chars"
-                )
-
             chunk_point = self._create_point(
                 point_type="chunk",
                 note_id=parsed.id,
                 chunk_index=i,
                 content=chunk.content,
-                embedding=embeddings[i + 1],
+                embedding=embeddings[i],
                 payload={
                     "type": "chunk",
                     "note_id": str(parsed.id),
@@ -397,7 +399,9 @@ class NoteIndexer:
                     "section_title": chunk.section_title,
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
-                    "content": chunk.content[: settings.max_payload_content_chars],
+                    "start_char": chunk.start_char,
+                    "end_char": chunk.end_char,
+                    "content": chunk.content,
                     "tags": parsed.tags,
                     "category": category,  # From path, not frontmatter
                     "created": parsed.created.isoformat(),
@@ -407,10 +411,27 @@ class NoteIndexer:
             points.append(chunk_point)
 
         # Upsert
-        await self.storage.upsert_batch(self.collection_name, points)
+        await upsert_fragment_group(self.storage, self.collection_name, file_points)
+        for point in points:
+            await upsert_fragment_group(self.storage, self.collection_name, [point])
         logger.debug(f"Indexed note {parsed.id} with {len(chunks)} chunks")
 
         return len(chunks)
+
+    async def _complete_note_index(self, parsed: ParsedNote, category: str | None) -> None:
+        """Publish the current source hash only after writes and orphan cleanup succeed."""
+        await self.storage.update_payload(
+            self.collection_name,
+            [
+                FieldCondition(key="type", match=MatchValue(value="note")),
+                FieldCondition(key="note_id", match=MatchValue(value=str(parsed.id))),
+            ],
+            {
+                "note_hash": self._hash_note(parsed, category),
+                "index_policy": self._index_policy(),
+                "source_reindex_pending": False,
+            },
+        )
 
     def _create_point(
         self,
@@ -431,9 +452,12 @@ class NoteIndexer:
         # Generate sparse vector using GlobalVocabulary
         sparse = self.global_vocab.vectorize_document(content)
 
-        return create_hybrid_point_with_key(
-            key, embedding, sparse, {**payload, "embedding_text": content}
+        retained = (
+            {"embedding_text_field": "content"}
+            if payload.get("content") == content
+            else {"embedding_text": content}
         )
+        return create_hybrid_point_with_key(key, embedding, sparse, {**payload, **retained})
 
     async def _delete_note_points(self, note_id: UUID) -> None:
         """Delete all points for a note."""
@@ -444,50 +468,19 @@ class NoteIndexer:
         )
 
     async def _delete_orphan_chunks(self, note_id: UUID, new_chunk_count: int) -> None:
-        """Delete orphaned chunks after re-indexing.
-
-        When a note is re-indexed, the number of chunks may change. Old chunks
-        with indices >= new_chunk_count need to be deleted. This uses deterministic
-        point IDs to identify and remove only the orphaned chunks.
-
-        Args:
-            note_id: Note UUID
-            new_chunk_count: Number of chunks in the new version
-        """
-        try:
-            # Query for chunk payloads to find orphan indices
-            # scroll_points returns list of payload dicts, not point objects
-            chunk_payloads = await self.storage.scroll_points(
-                self.collection_name,
-                filter_conditions=[
+        """Retire obsolete canonical chunks and their derived fragments together."""
+        client = await self.storage.get_client()
+        await client.delete(
+            self.collection_name,
+            points_selector=Filter(
+                must=[
                     FieldCondition(key="note_id", match=MatchValue(value=str(note_id))),
                     FieldCondition(key="type", match=MatchValue(value="chunk")),
-                ],
-                payload_fields=["chunk_index"],
-                limit=1000,  # Should be enough for any note
-            )
-
-            # Find orphaned chunk indices (>= new_chunk_count)
-            # Then calculate deterministic point IDs for deletion
-            orphan_ids = []
-            for payload in chunk_payloads:
-                chunk_index = payload.get("chunk_index")
-                if chunk_index is not None and chunk_index >= new_chunk_count:
-                    # Generate deterministic point ID matching _create_point()
-                    key = f"chunk:{note_id}:{chunk_index}"
-                    orphan_ids.append(generate_point_id(key))
-
-            # Delete orphans
-            if orphan_ids:
-                await self.storage.delete_points(self.collection_name, orphan_ids)
-                logger.debug(
-                    f"Deleted {len(orphan_ids)} orphan chunks for note {note_id} "
-                    f"(new chunk count: {new_chunk_count})"
-                )
-
-        except Exception as e:
-            # Log but don't fail - orphan cleanup is best-effort
-            logger.warning(f"Failed to clean up orphan chunks for note {note_id}: {e}")
+                    FieldCondition(key="chunk_index", range=Range(gte=new_chunk_count)),
+                ]
+            ),
+            wait=True,
+        )
 
     async def _get_indexed_hashes(self) -> dict[str, str]:
         """Get map of note_id -> hash for indexed notes."""
@@ -497,17 +490,28 @@ class NoteIndexer:
                 filter_conditions=[
                     FieldCondition(key="type", match=MatchValue(value="note")),
                 ],
-                payload_fields=["note_id", "note_hash", "embedding_text_source"],
+                payload_fields=[
+                    "note_id",
+                    "note_hash",
+                    "embedding_text_source",
+                    "index_policy",
+                    "embedding_fragment",
+                    "source_reindex_pending",
+                ],
             )
 
             return {
                 p["note_id"]: (
                     ""
-                    if p.get("embedding_text_source") == "legacy-note-metadata"
+                    if (
+                        p.get("embedding_text_source") == "legacy-note-metadata"
+                        or p.get("source_reindex_pending") is True
+                        or p.get("index_policy") != self._index_policy()
+                    )
                     else p.get("note_hash", "")
                 )
                 for p in points
-                if p.get("note_id")
+                if p.get("note_id") and not is_derived_fragment(p)
             }
         except Exception as e:
             logger.debug(f"Could not retrieve indexed hashes (collection may not exist): {e}")
@@ -515,8 +519,14 @@ class NoteIndexer:
 
     def _hash_note(self, parsed: ParsedNote, category: str | None) -> str:
         """Generate hash of note content including category from path."""
-        content = f"{parsed.title}:{parsed.body}:{','.join(parsed.tags)}:{category}"
+        content = (
+            f"{NOTE_INDEX_VERSION}:{parsed.title}:{parsed.body}:{','.join(parsed.tags)}:{category}"
+        )
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _index_policy() -> str:
+        return f"{NOTE_INDEX_VERSION}:{settings.max_chunk_chars}:{settings.section_overlap_chars}"
 
     async def get_status(self) -> IndexStatus:
         """Report status for the compatible physical generation."""

@@ -4,11 +4,15 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 from uuid import uuid4
 
+import pytest
+from vector_core import EmbeddingClient
+
 from mcp_notes.indexing.chunker import (
     _build_chunk_content,
-    _split_by_headers,
+    _source_sections,
     chunk_note,
     generate_note_summary,
+    settings,
 )
 from mcp_notes.storage.parser import ParsedNote
 
@@ -141,123 +145,11 @@ Content for section two with more text here."""
                 assert chunk.chunk_index == i
 
 
-class TestSplitByHeaders:
-    """Tests for _split_by_headers function."""
-
-    def test_no_headers(self):
-        """Content without headers is single section."""
-        content = "Just plain text without headers."
-
-        sections = _split_by_headers(content)
-
-        assert len(sections) == 1
-        assert sections[0]["title"] is None
-        assert "Just plain text" in sections[0]["content"]
-
-    def test_h1_headers(self):
-        """H1 headers create sections."""
-        content = """# First
-
-Content one.
-
-# Second
-
-Content two."""
-
-        sections = _split_by_headers(content)
-
-        assert len(sections) == 2
-        assert sections[0]["title"] == "First"
-        assert sections[1]["title"] == "Second"
-
-    def test_section_content_excludes_its_own_header(self):
-        """A section's content must not contain its own header line. The chunk
-        builder re-emits the section title as a header, so keeping the raw
-        header in the body duplicates it in the indexed, searchable chunk."""
-        content = """# First
-
-Content one.
-
-# Second
-
-Content two."""
-
-        sections = _split_by_headers(content)
-
-        assert not sections[0]["content"].lstrip().startswith("# First")
-        assert "Content one." in sections[0]["content"]
-        assert not sections[1]["content"].lstrip().startswith("# Second")
-        assert "Content two." in sections[1]["content"]
-
-    def test_h2_headers(self):
-        """H2 headers create sections."""
-        content = """## Section A
-
-Content A.
-
-## Section B
-
-Content B."""
-
-        sections = _split_by_headers(content)
-
-        assert len(sections) == 2
-        assert sections[0]["title"] == "Section A"
-        assert sections[1]["title"] == "Section B"
-
-    def test_content_before_first_header(self):
-        """Content before first header is captured."""
-        content = """Intro content here.
-
-# First Section
-
-Section content."""
-
-        sections = _split_by_headers(content)
-
-        # First section should have no title (content before header)
-        # Or might start with the header - check implementation
-        assert len(sections) >= 1
-        # At minimum the section content should be captured
-        assert any("content" in s["content"].lower() for s in sections)
-
-    def test_empty_sections_skipped(self):
-        """Empty sections are not included."""
-        content = """# Empty
-
-# Also Empty
-
-
-# Has Content
-
-Actual content here."""
-
-        sections = _split_by_headers(content)
-
-        # Only non-empty sections should be included
-        for section in sections:
-            # Content should not be just whitespace
-            if section["content"]:
-                assert section["content"].strip()
-
-    def test_section_line_numbers(self):
-        """Sections have correct line numbers."""
-        content = """# First
-
-Line 1
-Line 2
-
-# Second
-
-Line A"""
-
-        sections = _split_by_headers(content)
-
-        # Each section should have start_line and end_line
-        for section in sections:
-            assert "start_line" in section
-            assert "end_line" in section
-            assert section["end_line"] >= section["start_line"]
+def test_section_offsets_preserve_header_only_sections_and_intro():
+    body = "Intro.\n\n# Empty\n\n## Also empty\n\n# Body\nLast paragraph.\n"
+    sections = _source_sections(body)
+    assert [title for _, _, title in sections] == [None, "Empty", "Also empty", "Body"]
+    assert "".join(body[start:end] for start, end, _ in sections) == body
 
 
 class TestBuildChunkContent:
@@ -404,10 +296,12 @@ class TestLargeSectionSplitting:
         mock_settings.section_overlap_chars = 20
 
         # Create note with single section that exceeds max_chunk_chars
-        body = "Paragraph one with some content here.\n\n" + \
-               "Paragraph two has more content.\n\n" + \
-               "Paragraph three continues with text.\n\n" + \
-               "Paragraph four is the last one."
+        body = (
+            "Paragraph one with some content here.\n\n"
+            + "Paragraph two has more content.\n\n"
+            + "Paragraph three continues with text.\n\n"
+            + "Paragraph four is the last one."
+        )
 
         parsed = make_parsed_note(body)
 
@@ -423,10 +317,7 @@ class TestLargeSectionSplitting:
         mock_settings.section_overlap_chars = 10
 
         # Create paragraphs that will overflow
-        body = "Short intro.\n\n" + \
-               "A" * 60 + "\n\n" + \
-               "B" * 60 + "\n\n" + \
-               "Final paragraph."
+        body = "Short intro.\n\n" + "A" * 60 + "\n\n" + "B" * 60 + "\n\n" + "Final paragraph."
 
         parsed = make_parsed_note(body)
 
@@ -441,10 +332,7 @@ class TestLargeSectionSplitting:
         mock_settings.max_chunk_chars = 80
         mock_settings.section_overlap_chars = 30
 
-        body = "First para.\n\n" + \
-               "Second para.\n\n" + \
-               "Third para.\n\n" + \
-               "Fourth para."
+        body = "First para.\n\n" + "Second para.\n\n" + "Third para.\n\n" + "Fourth para."
 
         parsed = make_parsed_note(body)
 
@@ -466,17 +354,87 @@ It has multiple lines.
 But no markdown headers at all.
 Just regular paragraphs."""
 
-        sections = _split_by_headers(content)
+        sections = _source_sections(content)
 
         assert len(sections) == 1
-        assert sections[0]["title"] is None
-        assert "plain text content" in sections[0]["content"]
+        assert sections == [(0, len(content), None)]
 
     def test_content_starting_with_paragraph(self):
         """Content that starts with paragraph before headers."""
         content = "Intro paragraph here."
 
-        sections = _split_by_headers(content)
+        sections = _source_sections(content)
 
         assert len(sections) >= 1
-        assert any("Intro" in s["content"] for s in sections)
+        assert any("Intro" in content[start:end] for start, end, _ in sections)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x" * 1000 + "TAIL_MARKER",
+        "# Header only\n\n## Another empty header\n\n"
+        + "\u03b1\U0001f680 " * 200
+        + "\n\nTAIL_MARKER\n",
+        "Repeated paragraph.\n\n" * 100 + "TAIL_MARKER",
+    ],
+)
+def test_complete_source_spans_include_metadata_in_character_budget(monkeypatch, body):
+    monkeypatch.setattr(settings, "max_chunk_chars", 100)
+    monkeypatch.setattr(settings, "section_overlap_chars", 12)
+    parsed = make_parsed_note(body, title="Context", tags=["source"])
+    context = _build_chunk_content(parsed, "", None)
+    chunks = chunk_note(parsed)
+    covered = 0
+    for chunk in chunks:
+        assert len(chunk.content) <= 100
+        section_context = context
+        if chunk.section_title:
+            section_context += f"Section: {chunk.section_title}\n"
+        assert chunk.content == section_context + body[chunk.start_char : chunk.end_char]
+        assert chunk.start_char <= covered < chunk.end_char
+        covered = chunk.end_char
+        assert chunk.start_line == body.count("\n", 0, chunk.start_char) + 1
+    assert covered == len(body)
+    assert any("TAIL_MARKER" in chunk.content for chunk in chunks)
+
+
+def test_model_splitter_accounts_for_context_and_preserves_exact_body(monkeypatch):
+    monkeypatch.setattr(settings, "max_chunk_chars", 1000)
+    monkeypatch.setattr(settings, "section_overlap_chars", 0)
+    body = "One paragraph with no newline. " * 40 + "TAIL_MARKER"
+    parsed = make_parsed_note(body, title="Context", tags=["source"])
+    embedder = EmbeddingClient(max_text_chars=96, profile="raw")
+    context = _build_chunk_content(parsed, "", None)
+    chunks = chunk_note(parsed, embedder)
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 96 for chunk in chunks)
+    assert "".join(body[c.start_char : c.end_char] for c in chunks) == body
+    assert all(c.content == context + body[c.start_char : c.end_char] for c in chunks)
+
+
+def test_oversized_metadata_is_a_visible_error(monkeypatch):
+    monkeypatch.setattr(settings, "max_chunk_chars", 40)
+    with pytest.raises(ValueError, match="metadata"):
+        chunk_note(make_parsed_note("Body", title="x" * 100))
+
+
+def test_whitespace_body_uses_model_splitter_without_loss(monkeypatch):
+    monkeypatch.setattr(settings, "max_chunk_chars", 10000)
+    monkeypatch.setattr(settings, "section_overlap_chars", 0)
+    body = " \t\n" * 1000
+    parsed = make_parsed_note(body, title="Context")
+    chunks = chunk_note(parsed, EmbeddingClient(max_text_chars=96, profile="raw"))
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 96 for chunk in chunks)
+    assert "".join(body[c.start_char : c.end_char] for c in chunks) == body
+
+
+def test_heading_metadata_survives_model_split_without_duplicate_headers(monkeypatch):
+    monkeypatch.setattr(settings, "max_chunk_chars", 10000)
+    monkeypatch.setattr(settings, "section_overlap_chars", 0)
+    body = "# Section\n" + "word " * 100 + "\n## Empty\n"
+    chunks = chunk_note(make_parsed_note(body), EmbeddingClient(max_text_chars=96, profile="raw"))
+    assert {chunk.section_title for chunk in chunks} == {"Section", "Empty"}
+    assert "".join(body[c.start_char : c.end_char] for c in chunks) == body
+    assert sum(chunk.content.count("# Section\n") for chunk in chunks) == 1

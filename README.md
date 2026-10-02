@@ -17,7 +17,7 @@ Supports stateless MCP `2026-07-28` requests and legacy MCP clients from the sam
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.6.1
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.7.0
 pip install git+https://github.com/michaelkrauty/mcp-notes.git
 ```
 
@@ -200,7 +200,11 @@ Update the vector-core embedding configuration and restart the client. The first
 
 Model, resolved dimension, deployment namespace, and input formatting are part of the embedding identity. Change the deployment namespace whenever an unchanged model alias points to different weights. Reads and writes use a fixed physical generation; an older client that has been superseded must restart before further operations. Stop legacy server versions before changing configuration because those versions do not participate in migration locking.
 
-The original collection is retained. Failed builds remain inactive, and retrying creates a fresh candidate. New records preserve embedding input. Legacy note summaries without retained text can be rebuilt from stored metadata; their original chunks remain searchable. When local source changes are detected, complete note/chunk groups are refreshed without changing unrelated record types. Their vocabulary contribution is reconciled by the next normal full indexing pass. Missing sources belonging to another note directory use retained content rather than being treated as deleted.
+The original collection is retained. Failed builds remain inactive, and retrying creates a fresh candidate. New records preserve complete embedding input. Retained inputs larger than the configured model capacity use independently searchable fragments rather than truncation or averaged vectors. Legacy records require sufficient retained text or readable original source; missing source and historically truncated payloads can prevent complete reconstruction and must be surfaced. When local source changes are detected, complete note/chunk groups are refreshed without changing unrelated record types. Their vocabulary contribution is reconciled by the next normal full indexing pass. Missing files or unavailable source directories never imply deletion during migration: complete retained groups survive, while legacy metadata-only summaries without a reconstructable body fail explicitly.
+
+Note-level semantic search ranks complete passage matches and returns distinct notes. Similar-note lookup compares all indexed source passages and uses the best passage-pair score, excluding the source note before retrieval. The short note summary is auxiliary; it does not limit body coverage. Chunk text retains exact body spans, including oversized paragraphs and header-only sections, and highlights use full retained searchable text. Limits include repeated metadata and model role formatting. Metadata that cannot fit as repeated context produces an explicit error rather than being silently shortened.
+
+Explicit fact and glossary searches return distinct entities. Mixed all-types searches return distinct original source records, grouping their fragments while preserving markerless legacy matches. Winning fact and glossary fragments use lineage-validated canonical display fields and keep highlights from the matching snippet.
 
 For exact tokenizer-based input limits, install the optional extra with `uv sync --extra tokenizer` or `pip install 'mcp-notes[tokenizer]'`, then configure vector-core's tokenizer and token limit. Without that extra, vector-core uses its conservative fallback limit. Query and document formatting is handled by the embedding client; callers should provide ordinary, unprefixed text.
 
