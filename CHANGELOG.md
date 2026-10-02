@@ -15,7 +15,8 @@
 - Note hashes and indexing-policy markers become current only after passage writes and orphan cleanup complete. Failed new-note or existing-note writes remain pending and are retried by incremental indexing.
 - Filter-only listings exclude derived embedding fragments before pagination, returning canonical records without duplicate notes or fragment-starved candidate limits.
 - Explicit fact and glossary searches group complete passage matches by entity, including sparse-only fallback. Winning tail fragments hydrate canonical display fields while preserving their actual snippet highlights.
-- Mixed all-types searches group fragments by original source record, retain markerless legacy candidates, and validate canonical entity lineage before hydrating winning display fields.
+- Default note/chunk and mixed all-types searches group fragments by original source record and retain markerless legacy candidates. Mixed searches validate canonical entity lineage before hydrating winning display fields.
+- Similar-note lookup queries every source vector with bounded concurrency, cancels and joins a failed query batch, and hydrates only final winners.
 - Embedding migrations preserve complete retained note groups when their original files or source directory are unavailable. Legacy metadata-only summaries without a reconstructable body fail explicitly and leave the active generation intact; missing files do not imply deletion.
 
 ## [1.2.1] - 2026-10-01

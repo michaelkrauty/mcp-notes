@@ -12,6 +12,7 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    GroupsResult,
     IsEmptyCondition,
     MatchAny,
     MatchValue,
@@ -214,7 +215,7 @@ class NoteSearchEngine:
             if rollup_notes
             else {"fact": "fact_id", "glossary": "glossary_id"}.get(type_filter or "")
         )
-        if type_filter == "all" and mode == "both":
+        if type_filter in {None, "all"} and mode == "both":
             group_by = "embedding_fragment.parent_id"
 
         qdrant_filters.extend(self._semantic_type_filters(mode, type_filter))
@@ -664,6 +665,20 @@ class NoteSearchEngine:
             must_not=[FieldCondition(key="note_id", match=MatchValue(value=str(note_id)))],
         )
         best: dict[int | str, tuple[int | str | UUID, float]] = {}
+
+        async def targets(vector: list[float]) -> GroupsResult:
+            return await client.query_points_groups(
+                collection,
+                query=vector,
+                using="dense",
+                group_by="note_id",
+                group_size=1,
+                limit=limit,
+                query_filter=target_filter,
+                with_payload=False,
+                with_vectors=False,
+            )
+
         offset = None
         while True:
             sources, offset = await client.scroll(
@@ -674,25 +689,25 @@ class NoteSearchEngine:
                 with_vectors=["dense"],
                 with_payload=False,
             )
+            vectors: list[list[float]] = []
             for source in sources:
                 vector = source.vector
                 if not isinstance(vector, dict) or not vector.get("dense"):
                     raise ValueError("Indexed note chunk has no dense vector")
-                response = await client.query_points_groups(
-                    collection,
-                    query=vector["dense"],
-                    using="dense",
-                    group_by="note_id",
-                    group_size=1,
-                    limit=limit,
-                    query_filter=target_filter,
-                    with_payload=False,
-                    with_vectors=False,
-                )
-                for group in response.groups:
-                    for hit in group.hits:
-                        if group.id not in best or hit.score > best[group.id][1]:
-                            best[group.id] = (hit.id, hit.score)
+                vectors.append(cast(list[float], vector["dense"]))
+            # Bound outstanding requests, not source coverage. Each passage
+            # retains its own target ranking and all pages are processed.
+            for start in range(0, len(vectors), 8):
+                async with asyncio.TaskGroup() as batch:
+                    tasks = [
+                        batch.create_task(targets(vector)) for vector in vectors[start : start + 8]
+                    ]
+                for task in tasks:
+                    response = task.result()
+                    for group in response.groups:
+                        for hit in group.hits:
+                            if group.id not in best or hit.score > best[group.id][1]:
+                                best[group.id] = (hit.id, hit.score)
             if offset is None:
                 break
         winners = sorted(best.values(), key=lambda hit: hit[1], reverse=True)[:limit]

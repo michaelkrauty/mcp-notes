@@ -197,6 +197,63 @@ async def test_mixed_markerless_legacy_entities_survive_sparse_fallback(isolated
     client.retrieve.assert_not_awaited()
 
 
+@pytest.mark.parametrize("degraded", [False, True])
+async def test_default_search_groups_summary_fragments_without_starving_distinct_sources(
+    isolated_entity_engine, degraded
+):
+    engine, storage, embedder, collection = isolated_entity_engine
+    note_id, legacy_id = uuid4(), uuid4()
+    summary = await fragment_point(
+        embedder,
+        point_id=generate_point_id(f"note:{note_id}"),
+        payload={"type": "note", "note_id": str(note_id), "title": "Large summary"},
+        text="TAIL_MARKER summary " * 400,
+        sparse=SparseVector(indices=[42], values=[10.0]),
+        vectorize=lambda text: SparseVector(indices=[42], values=[10.0]),
+    )
+    assert len(summary) > max(4 * 3, 4 + 20)
+    await upsert_fragment_group(storage, collection, summary)
+    chunk = await fragment_point(
+        embedder,
+        point_id=generate_point_id(f"chunk:{note_id}:0"),
+        payload={"type": "chunk", "note_id": str(note_id), "title": "Distinct chunk"},
+        text="TAIL_MARKER distinct body",
+        sparse=SparseVector(indices=[42], values=[1.0]),
+    )
+    await upsert_fragment_group(storage, collection, chunk)
+    client = await storage.get_client()
+    await client.upsert(
+        collection,
+        points=[
+            PointStruct(
+                id=generate_point_id(f"{kind}:{legacy_id}"),
+                payload={
+                    "type": kind,
+                    "note_id": str(legacy_id),
+                    "title": f"Legacy {kind}",
+                    "content": "TAIL_MARKER retained legacy source",
+                },
+                vector={"dense": [1.0, 0.0], "sparse": {"indices": [42], "values": [1.0]}},
+            )
+            for kind in ("note", "chunk")
+        ],
+    )
+    if degraded:
+        embedder.embed_single_cached = AsyncMock(
+            side_effect=CircuitBreakerOpenError("isolated", retry_after=1.0)
+        )
+    results = await engine.search("TAIL_MARKER", limit=4)
+    assert len(results) == 4
+    assert {(result.note.id, result.result_type) for result in results} == {
+        (note_id, "note"),
+        (note_id, "chunk"),
+        (legacy_id, "note"),
+        (legacy_id, "chunk"),
+    }
+    assert all(result.degraded == degraded for result in results)
+    assert all(any("TAIL_MARKER" in text for text in result.highlights) for result in results)
+
+
 @pytest.mark.parametrize("entity_type", ["fact", "glossary"])
 async def test_entity_hydration_preserves_winning_fragment_evidence(
     isolated_entity_engine, entity_type

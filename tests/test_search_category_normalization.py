@@ -17,12 +17,9 @@ from mcp_notes.search.filters import SearchFilters, filters_to_qdrant
 
 
 def _categories_in_query_points(mock_client) -> list[str]:
-    """Collect the 'category' MatchValue values applied by the most recent
-    query_points call. The sparse + dense prefetch branches share one Filter,
-    so inspecting a single branch reflects the actual set of conditions."""
-    call = mock_client.query_points.call_args
-    prefetch = call.kwargs["prefetch"]
-    flt = getattr(prefetch[0], "filter", None)
+    """Collect category conditions from one grouped modality without double-counting."""
+    call = mock_client.query_points_groups.call_args
+    flt = call.kwargs["query_filter"]
     if flt is None:
         return []
     return [

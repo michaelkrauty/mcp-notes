@@ -1,5 +1,6 @@
 """Tests for the search engine."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -133,6 +134,7 @@ class TestSearch:
         # Create async mock client
         mock_client = AsyncMock()
         mock_client.query_points = AsyncMock()
+        mock_client.query_points_groups = AsyncMock(return_value=SimpleNamespace(groups=[]))
         mock_client.scroll = AsyncMock(return_value=([], None))
 
         mock_storage = MagicMock()
@@ -169,6 +171,7 @@ class TestSearch:
 
         note_id = "123e4567-e89b-12d3-a456-426614174000"
         mock_point = MagicMock()
+        mock_point.id = note_id
         mock_point.score = 0.9
         mock_point.payload = {
             "note_id": note_id,
@@ -193,7 +196,7 @@ class TestSearch:
         assert len(results) == 1
         assert results[0].note.id == UUID(note_id)
         assert results[0].note.title == "Test Note"
-        assert results[0].score == 0.9
+        assert results[0].score == pytest.approx(2 / 61)
 
     async def test_search_empty_query_filter_only(self, mock_engine):
         """Empty query falls back to filter-only search."""
@@ -230,8 +233,10 @@ class TestSearch:
         # search_notes tool passes neither).
         await mock_engine.search("some query")
 
-        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
-        query_filter = prefetch[0].filter
+        query_filter = mock_client.query_points_groups.call_args.kwargs["query_filter"]
+        assert mock_client.query_points_groups.call_args.kwargs["group_by"] == (
+            "embedding_fragment.parent_id"
+        )
         assert query_filter is not None
         type_conditions = [
             c for c in (query_filter.must or []) if getattr(c, "key", None) == "type"
@@ -507,6 +512,58 @@ class TestFindSimilar:
         assert [(condition.key, condition.match.value) for condition in target_filter.must] == [
             ("type", "chunk")
         ]
+
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_similarity_bounds_concurrency_and_joins_failed_batch(self, mock_engine, fails):
+        client = mock_engine._mock_client
+        vectors = [[float(index), 1.0] for index in range(20)]
+        client.scroll.return_value = (
+            [SimpleNamespace(vector={"dense": vector}) for vector in vectors],
+            None,
+        )
+        gate = asyncio.Event()
+        parked = asyncio.Event()
+        active = peak = cancelled = 0
+
+        async def query(*args, **kwargs):
+            nonlocal active, peak, cancelled
+            active += 1
+            peak = max(peak, active)
+            if active == 8:
+                gate.set()
+            try:
+                await gate.wait()
+                if fails:
+                    if kwargs["query"] == vectors[0]:
+                        raise RuntimeError("Target query failed")
+                    await parked.wait()
+                await asyncio.sleep(0)
+                return SimpleNamespace(groups=[])
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+            finally:
+                active -= 1
+
+        client.query_points_groups.side_effect = query
+        async with asyncio.timeout(2):
+            if fails:
+                with pytest.raises(ExceptionGroup, match="TaskGroup") as error:
+                    await mock_engine.find_similar(UUID(int=1))
+                assert any(
+                    isinstance(exc, RuntimeError) and str(exc) == "Target query failed"
+                    for exc in error.value.exceptions
+                )
+                assert cancelled == 7
+                assert client.query_points_groups.await_count == 8
+            else:
+                assert await mock_engine.find_similar(UUID(int=1)) == []
+                assert [
+                    call.kwargs["query"] for call in client.query_points_groups.await_args_list
+                ] == vectors
+        assert peak == 8
+        assert active == 0
+        client.retrieve.assert_not_awaited()
 
 
 class TestFilterOnlySearch:
