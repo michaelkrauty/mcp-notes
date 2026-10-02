@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.3.0] - 2026-10-02
+
+### Changed
+
+- Pin vector-core to v1.7.0 for strict lossless embedding inputs, searchable fragments, and recoverable fragment-group replacement.
+- Note-level search rolls up matches from complete indexed passages, with distinct note candidates selected before rank fusion. Similar-note lookup compares all source passages and ranks notes by their best passage-pair match. Summary vectors remain auxiliary representations.
+- Note chunks retain full searchable text and exact body character spans. Chunk limits include metadata, and model-aware splitting preserves oversized paragraphs, header-only sections, whitespace, and tails without truncation.
+- Auxiliary summary inputs can use independently searchable embedding fragments when they exceed the configured model capacity. Replacing their canonical point retires obsolete fragment children.
+
+### Fixed
+
+- Highlights can inspect retained searchable text beyond the previous payload excerpt limit. Source-backed embedding migrations rebuild changed chunk layouts and ignore derived fragment children during source reconciliation.
+- Note hashes and indexing-policy markers become current only after passage writes and orphan cleanup complete. Failed new-note or existing-note writes remain pending and are retried by incremental indexing.
+- Public index status counts only completed current-policy notes and reports pending or policy-mismatched entries as unhealthy without removing them from the incremental retry map. Bulk indexing remains unhealthy while retained incomplete groups lack readable source, including no-work passes and passes that successfully index other notes.
+- Filter-only listings exclude derived embedding fragments before pagination, returning canonical records without duplicate notes or fragment-starved candidate limits.
+- Explicit fact and glossary searches group complete passage matches by entity, including sparse-only fallback. Winning tail fragments hydrate canonical display fields while preserving their actual snippet highlights.
+- Default note/chunk and mixed all-types searches group fragments by original source record and retain markerless legacy candidates. Mixed searches validate canonical entity lineage before hydrating winning display fields.
+- Similar-note lookup queries every source vector with bounded concurrency, cancels and joins a failed query batch, and hydrates only final winners.
+- Embedding migrations preserve complete retained note groups when their original files or source directory are unavailable. Legacy metadata-only summaries without a reconstructable body fail explicitly and leave the active generation intact; missing files do not imply deletion.
+- Tests initialize session-owned cache, vocabulary, shared-store, and note paths before settings imports, replacing ambient data paths and cleaning them on exit. Subprocess tests inherit isolation, and service endpoints require explicit configuration.
+
 ## [1.2.1] - 2026-10-01
 
 ### Fixed

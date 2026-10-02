@@ -16,15 +16,9 @@ from mcp_notes.search.filters import SearchFilters, filters_to_qdrant
 
 
 def _tags_in_query_points(mock_client) -> list[str]:
-    """Collect the 'tags' MatchValue values applied by the most recent
-    query_points call.
-
-    Hybrid search issues two prefetch branches (sparse + dense) that share the
-    same Filter object, so inspecting a single branch reflects the actual set
-    of tag conditions (looking at both would double-count)."""
-    call = mock_client.query_points.call_args
-    prefetch = call.kwargs["prefetch"]
-    flt = getattr(prefetch[0], "filter", None)
+    """Collect tag conditions from one grouped modality without double-counting."""
+    call = mock_client.query_points_groups.call_args
+    flt = call.kwargs["query_filter"]
     if flt is None:
         return []
     return [cond.match.value for cond in (flt.must or []) if getattr(cond, "key", None) == "tags"]
@@ -144,10 +138,10 @@ class TestHybridPrefetchScaling:
 
         await mock_engine.search("project", limit=80)
 
-        call = mock_client.query_points.call_args
-        prefetch = call.kwargs["prefetch"]
-        fetch_limit = call.kwargs["limit"]
-        assert fetch_limit >= 80
-        # Each modality must fetch at least the post-fusion need.
-        for branch in prefetch:
-            assert branch.limit >= fetch_limit
+        # Both grouped and markerless pools in each modality scale to the
+        # post-fusion candidate limit, preserving large caller limits.
+        for call in (
+            *mock_client.query_points_groups.call_args_list,
+            *mock_client.query_points.call_args_list,
+        ):
+            assert call.kwargs["limit"] >= 80 * 3

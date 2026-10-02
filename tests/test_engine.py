@@ -1,5 +1,7 @@
 """Tests for the search engine."""
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -132,6 +134,7 @@ class TestSearch:
         # Create async mock client
         mock_client = AsyncMock()
         mock_client.query_points = AsyncMock()
+        mock_client.query_points_groups = AsyncMock(return_value=SimpleNamespace(groups=[]))
         mock_client.scroll = AsyncMock(return_value=([], None))
 
         mock_storage = MagicMock()
@@ -168,6 +171,7 @@ class TestSearch:
 
         note_id = "123e4567-e89b-12d3-a456-426614174000"
         mock_point = MagicMock()
+        mock_point.id = note_id
         mock_point.score = 0.9
         mock_point.payload = {
             "note_id": note_id,
@@ -192,7 +196,7 @@ class TestSearch:
         assert len(results) == 1
         assert results[0].note.id == UUID(note_id)
         assert results[0].note.title == "Test Note"
-        assert results[0].score == 0.9
+        assert results[0].score == pytest.approx(2 / 61)
 
     async def test_search_empty_query_filter_only(self, mock_engine):
         """Empty query falls back to filter-only search."""
@@ -229,8 +233,10 @@ class TestSearch:
         # search_notes tool passes neither).
         await mock_engine.search("some query")
 
-        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
-        query_filter = prefetch[0].filter
+        query_filter = mock_client.query_points_groups.call_args.kwargs["query_filter"]
+        assert mock_client.query_points_groups.call_args.kwargs["group_by"] == (
+            "embedding_fragment.parent_id"
+        )
         assert query_filter is not None
         type_conditions = [
             c for c in (query_filter.must or []) if getattr(c, "key", None) == "type"
@@ -252,8 +258,10 @@ class TestSearch:
 
         await mock_engine.search("some query", type_filter="all")
 
-        prefetch = mock_client.query_points.call_args.kwargs["prefetch"]
-        query_filter = prefetch[0].filter
+        query_filter = mock_client.query_points_groups.call_args.kwargs["query_filter"]
+        assert mock_client.query_points_groups.call_args.kwargs["group_by"] == (
+            "embedding_fragment.parent_id"
+        )
         type_conditions = [
             c
             for c in ((query_filter.must if query_filter else []) or [])
@@ -301,8 +309,8 @@ class TestFindSimilar:
 
         # Create async mock client
         mock_client = AsyncMock()
-        mock_client.retrieve = AsyncMock(return_value=[])
-        mock_client.query_points = AsyncMock()
+        mock_client.scroll = AsyncMock(return_value=([], None))
+        mock_client.query_points_groups = AsyncMock(return_value=SimpleNamespace(groups=[]))
 
         mock_storage = MagicMock()
         mock_storage._get_client = AsyncMock(return_value=mock_client)
@@ -326,19 +334,20 @@ class TestFindSimilar:
         """Find similar returns matching notes."""
         mock_client = mock_engine._mock_client
 
-        # Mock retrieve for source note
+        # Source passages, rather than the truncated note-summary vector, drive similarity.
         source_id = "123e4567-e89b-12d3-a456-426614174000"
         mock_source_point = MagicMock()
         mock_source_point.vector = {"dense": [0.1] * 1024}
-        mock_client.retrieve.return_value = [mock_source_point]
+        mock_client.scroll.return_value = ([mock_source_point], None)
 
         # Mock similar notes query
         similar_id = "223e4567-e89b-12d3-a456-426614174001"
         mock_similar = MagicMock()
+        mock_similar.id = similar_id
         mock_similar.score = 0.85
         mock_similar.payload = {
             "note_id": similar_id,
-            "type": "note",
+            "type": "chunk",
             "title": "Similar Note",
             "tags": [],
             "category": None,
@@ -347,24 +356,122 @@ class TestFindSimilar:
         }
 
         mock_response = MagicMock()
-        mock_response.points = [mock_similar]
-        mock_client.query_points.return_value = mock_response
+        mock_response.groups = [SimpleNamespace(id=similar_id, hits=[mock_similar])]
+        mock_client.query_points_groups.return_value = mock_response
+        mock_client.retrieve.return_value = [mock_similar]
 
         results = await mock_engine.find_similar(UUID(source_id), limit=5)
 
         assert len(results) == 1
         assert results[0].note.id == UUID(similar_id)
         assert results[0].score == 0.85
+        assert results[0].result_type == "note"
 
     async def test_find_similar_no_source_vector(self, mock_engine):
         """Return empty if source note has no vector."""
         mock_client = mock_engine._mock_client
-        mock_client.retrieve.return_value = []
+        mock_client.scroll.return_value = ([], None)
 
         source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
         results = await mock_engine.find_similar(source_id)
 
         assert results == []
+        mock_client.query_points_groups.assert_not_awaited()
+
+    async def test_find_similar_paginates_all_passages_and_keeps_best_pair(self, mock_engine):
+        """Later source pages and repeated target notes retain their strongest passage pair."""
+        client = mock_engine._mock_client
+        source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
+        first_id = "223e4567-e89b-12d3-a456-426614174001"
+        second_id = "323e4567-e89b-12d3-a456-426614174002"
+        third_id = "423e4567-e89b-12d3-a456-426614174003"
+        vectors = [[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]]
+        client.scroll.side_effect = [
+            ([SimpleNamespace(vector={"dense": vector}) for vector in vectors[:2]], "page-two"),
+            ([SimpleNamespace(vector={"dense": vectors[2]})], None),
+        ]
+
+        def response(*matches):
+            return SimpleNamespace(
+                groups=[
+                    SimpleNamespace(
+                        id=note_id,
+                        hits=[
+                            SimpleNamespace(
+                                id=content,
+                                score=score,
+                                payload={
+                                    "note_id": note_id,
+                                    "type": "chunk",
+                                    "title": "Match",
+                                    "content": content,
+                                    "tags": [],
+                                    "created": "2024-01-01T00:00:00+00:00",
+                                },
+                            )
+                        ],
+                    )
+                    for note_id, score, content in matches
+                ]
+            )
+
+        client.query_points_groups.side_effect = [
+            response((first_id, 0.4, "weak first"), (second_id, 0.7, "best second")),
+            response((first_id, 0.9, "best first"), (third_id, 0.5, "third")),
+            response((second_id, 0.6, "weaker second"), (third_id, 0.95, "tail third")),
+        ]
+        client.retrieve.return_value = [
+            SimpleNamespace(
+                id="tail third",
+                payload={
+                    "note_id": third_id,
+                    "type": "chunk",
+                    "title": "Match",
+                    "content": "tail third",
+                },
+            ),
+            SimpleNamespace(
+                id="best first",
+                payload={
+                    "note_id": first_id,
+                    "type": "chunk",
+                    "title": "Match",
+                    "content": "best first",
+                },
+            ),
+        ]
+
+        results = await mock_engine.find_similar(source_id, limit=2)
+
+        assert [(str(result.note.id), result.score, result.note.excerpt) for result in results] == [
+            (third_id, 0.95, "tail third"),
+            (first_id, 0.9, "best first"),
+        ]
+        assert all(result.result_type == "note" for result in results)
+        assert [call.kwargs["offset"] for call in client.scroll.await_args_list] == [
+            None,
+            "page-two",
+        ]
+        for call in client.scroll.await_args_list:
+            assert call.kwargs["with_vectors"] == ["dense"]
+            source_filter = call.kwargs["scroll_filter"]
+            assert [(condition.key, condition.match.value) for condition in source_filter.must] == [
+                ("note_id", str(source_id)),
+                ("type", "chunk"),
+            ]
+        assert [
+            call.kwargs["query"] for call in client.query_points_groups.await_args_list
+        ] == vectors
+        for call in client.query_points_groups.await_args_list:
+            assert call.kwargs["group_by"] == "note_id"
+            assert call.kwargs["group_size"] == 1
+            assert call.kwargs["limit"] == 2
+            assert call.kwargs["using"] == "dense"
+            assert call.kwargs["query_filter"].must_not[0].match.value == str(source_id)
+            assert call.kwargs["with_payload"] is False
+            assert call.kwargs["with_vectors"] is False
+        client.retrieve.assert_awaited_once()
+        assert client.retrieve.call_args.kwargs["ids"] == ["tail third", "best first"]
 
     async def test_find_similar_excludes_source(self, mock_engine):
         """Similar results exclude the source note itself."""
@@ -373,15 +480,11 @@ class TestFindSimilar:
         source_id = "123e4567-e89b-12d3-a456-426614174000"
         mock_source = MagicMock()
         mock_source.vector = {"dense": [0.1] * 1024}
-        mock_client.retrieve.return_value = [mock_source]
-
-        # Query returns both source and different note
-        source_result = MagicMock()
-        source_result.score = 1.0
-        source_result.payload = {"note_id": source_id, "type": "note"}
+        mock_client.scroll.return_value = ([mock_source], None)
 
         different_id = "223e4567-e89b-12d3-a456-426614174001"
         different_result = MagicMock()
+        different_result.id = different_id
         different_result.score = 0.8
         different_result.payload = {
             "note_id": different_id,
@@ -393,14 +496,74 @@ class TestFindSimilar:
         }
 
         mock_response = MagicMock()
-        mock_response.points = [source_result, different_result]
-        mock_client.query_points.return_value = mock_response
+        mock_response.groups = [SimpleNamespace(id=different_id, hits=[different_result])]
+        mock_client.query_points_groups.return_value = mock_response
+        mock_client.retrieve.return_value = [different_result]
 
         results = await mock_engine.find_similar(UUID(source_id), limit=5)
 
         # Should exclude source note
         result_ids = [r.note.id for r in results]
         assert UUID(source_id) not in result_ids
+        target_filter = mock_client.query_points_groups.call_args.kwargs["query_filter"]
+        assert [(condition.key, condition.match.value) for condition in target_filter.must_not] == [
+            ("note_id", source_id)
+        ]
+        assert [(condition.key, condition.match.value) for condition in target_filter.must] == [
+            ("type", "chunk")
+        ]
+
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_similarity_bounds_concurrency_and_joins_failed_batch(self, mock_engine, fails):
+        client = mock_engine._mock_client
+        vectors = [[float(index), 1.0] for index in range(20)]
+        client.scroll.return_value = (
+            [SimpleNamespace(vector={"dense": vector}) for vector in vectors],
+            None,
+        )
+        gate = asyncio.Event()
+        parked = asyncio.Event()
+        active = peak = cancelled = 0
+
+        async def query(*args, **kwargs):
+            nonlocal active, peak, cancelled
+            active += 1
+            peak = max(peak, active)
+            if active == 8:
+                gate.set()
+            try:
+                await gate.wait()
+                if fails:
+                    if kwargs["query"] == vectors[0]:
+                        raise RuntimeError("Target query failed")
+                    await parked.wait()
+                await asyncio.sleep(0)
+                return SimpleNamespace(groups=[])
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+            finally:
+                active -= 1
+
+        client.query_points_groups.side_effect = query
+        async with asyncio.timeout(2):
+            if fails:
+                with pytest.raises(ExceptionGroup, match="TaskGroup") as error:
+                    await mock_engine.find_similar(UUID(int=1))
+                assert any(
+                    isinstance(exc, RuntimeError) and str(exc) == "Target query failed"
+                    for exc in error.value.exceptions
+                )
+                assert cancelled == 7
+                assert client.query_points_groups.await_count == 8
+            else:
+                assert await mock_engine.find_similar(UUID(int=1)) == []
+                assert [
+                    call.kwargs["query"] for call in client.query_points_groups.await_args_list
+                ] == vectors
+        assert peak == 8
+        assert active == 0
+        client.retrieve.assert_not_awaited()
 
 
 class TestFilterOnlySearch:
@@ -505,8 +668,8 @@ class TestFindSimilarEdgeCases:
         mock_store.base_dir = "/path/to/notes"
 
         mock_client = AsyncMock()
-        mock_client.retrieve = AsyncMock(return_value=[])
-        mock_client.query_points = AsyncMock()
+        mock_client.scroll = AsyncMock(return_value=([], None))
+        mock_client.query_points_groups = AsyncMock(return_value=SimpleNamespace(groups=[]))
 
         mock_storage = MagicMock()
         mock_storage._get_client = AsyncMock(return_value=mock_client)
@@ -524,41 +687,40 @@ class TestFindSimilarEdgeCases:
         engine._mock_client = mock_client
         return engine
 
-    async def test_find_similar_retrieve_exception(self, mock_engine):
-        """find_similar returns empty on retrieve exception (line 378-379)."""
+    async def test_find_similar_scroll_exception(self, mock_engine):
+        """Source enumeration failures propagate instead of hiding partial coverage."""
         mock_client = mock_engine._mock_client
-        mock_client.retrieve.side_effect = Exception("Network error")
+        mock_client.scroll.side_effect = RuntimeError("Network error")
 
         source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
-        results = await mock_engine.find_similar(source_id)
-
-        assert results == []
+        with pytest.raises(RuntimeError, match="Network error"):
+            await mock_engine.find_similar(source_id)
 
     async def test_find_similar_vector_not_dict(self, mock_engine):
-        """find_similar returns empty when vector is not a dict (line 385-386)."""
+        """Malformed source vectors fail closed rather than silently dropping passages."""
         mock_client = mock_engine._mock_client
 
         mock_point = MagicMock()
         mock_point.vector = [0.1] * 1024  # List instead of dict
-        mock_client.retrieve.return_value = [mock_point]
+        mock_client.scroll.return_value = ([mock_point], None)
 
         source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
-        results = await mock_engine.find_similar(source_id)
-
-        assert results == []
+        with pytest.raises(ValueError, match="no dense vector"):
+            await mock_engine.find_similar(source_id)
+        mock_client.query_points_groups.assert_not_awaited()
 
     async def test_find_similar_missing_dense_vector(self, mock_engine):
-        """find_similar returns empty when dense vector missing (line 389)."""
+        """A sparse-only chunk cannot silently disappear from source coverage."""
         mock_client = mock_engine._mock_client
 
         mock_point = MagicMock()
         mock_point.vector = {"sparse": [0.1, 0.2]}  # No "dense" key
-        mock_client.retrieve.return_value = [mock_point]
+        mock_client.scroll.return_value = ([mock_point], None)
 
         source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
-        results = await mock_engine.find_similar(source_id)
-
-        assert results == []
+        with pytest.raises(ValueError, match="no dense vector"):
+            await mock_engine.find_similar(source_id)
+        mock_client.query_points_groups.assert_not_awaited()
 
     async def test_find_similar_skips_invalid_result_uuid(self, mock_engine):
         """find_similar skips results with invalid UUID (line 415-416)."""
@@ -567,10 +729,11 @@ class TestFindSimilarEdgeCases:
         # Source point with valid vector
         mock_source = MagicMock()
         mock_source.vector = {"dense": [0.1] * 1024}
-        mock_client.retrieve.return_value = [mock_source]
+        mock_client.scroll.return_value = ([mock_source], None)
 
         # Results include invalid and valid UUIDs
         invalid_result = MagicMock()
+        invalid_result.id = "invalid-point"
         invalid_result.score = 0.9
         invalid_result.payload = {
             "note_id": "not-a-valid-uuid",  # Invalid
@@ -578,6 +741,7 @@ class TestFindSimilarEdgeCases:
         }
 
         valid_result = MagicMock()
+        valid_result.id = "valid-point"
         valid_result.score = 0.8
         valid_result.payload = {
             "note_id": "223e4567-e89b-12d3-a456-426614174001",
@@ -588,8 +752,12 @@ class TestFindSimilarEdgeCases:
         }
 
         mock_response = MagicMock()
-        mock_response.points = [invalid_result, valid_result]
-        mock_client.query_points.return_value = mock_response
+        mock_response.groups = [
+            SimpleNamespace(id="not-a-valid-uuid", hits=[invalid_result]),
+            SimpleNamespace(id="223e4567-e89b-12d3-a456-426614174001", hits=[valid_result]),
+        ]
+        mock_client.query_points_groups.return_value = mock_response
+        mock_client.retrieve.return_value = [invalid_result, valid_result]
 
         source_id = UUID("123e4567-e89b-12d3-a456-426614174000")
         results = await mock_engine.find_similar(source_id, limit=5)

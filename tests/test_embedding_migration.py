@@ -21,6 +21,7 @@ from vector_core.storage.embedding_migration import (
     ensure_embedding_collection,
     resolve_shared_embedding_text,
 )
+from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.indexing.indexer import NoteIndexer
@@ -69,6 +70,7 @@ async def corpus(tmp_path, monkeypatch):
                 "tags": [],
                 "category": None,
                 "note_hash": indexer._hash_note(parsed, None),
+                "index_policy": indexer._index_policy(),
             },
         ),
         (
@@ -146,6 +148,15 @@ async def test_symlinked_source_root_reconciles_owned_notes(corpus, deleted):
     root.symlink_to(target, target_is_directory=True)
     if deleted:
         indexer.note_store.get_note_path(note.id).unlink()
+        with pytest.raises(
+            EmbeddingMigrationError, match="complete retained embedding input is missing"
+        ):
+            await ensure_notes_collection(indexer)
+        assert (
+            await active_embedding_collection(indexer.storage, indexer.logical_collection_name)
+            == indexer.logical_collection_name
+        )
+        return
     else:
         indexer.note_store.update(note.id, content="Changed under symlinked root")
     generation = await ensure_notes_collection(indexer)
@@ -193,11 +204,14 @@ async def test_modern_orphan_chunks_reconcile_owned_source(corpus, change):
         point.payload for point in result.values() if point.payload.get("note_id") == str(note.id)
     ]
     if change == "delete":
-        assert not owned
+        assert {payload["type"] for payload in owned} == {"chunk"}
+        assert all("Original content" in stored_embedding_text(payload) for payload in owned)
     else:
         assert {payload["type"] for payload in owned} == {"note", "chunk"}
         if change == "edit":
-            assert all("Edited orphan source" in payload["embedding_text"] for payload in owned)
+            assert all(
+                "Edited orphan source" in stored_embedding_text(payload) for payload in owned
+            )
 
 
 async def test_restore_reads_current_path_only_after_mutation_lock(monkeypatch):
@@ -349,17 +363,17 @@ async def test_similar_lookup_uses_stored_vector_during_identity_outage(corpus):
         indexer.note_store, indexer.storage, indexer.embedder, indexer.global_vocab
     )
     client = await indexer.storage.get_client()
-    client.retrieve = AsyncMock(wraps=client.retrieve)
-    client.query_points = AsyncMock(wraps=client.query_points)
+    client.scroll = AsyncMock(wraps=client.scroll)
+    client.query_points_groups = AsyncMock(wraps=client.query_points_groups)
     await engine.find_similar(note.id)
     indexer.embedder.embed_single_cached.assert_not_awaited()
-    assert client.retrieve.await_args.args[0] == generation.physical_name
-    assert client.query_points.await_args.args[0] == generation.physical_name
-    assert client.query_points.await_args.kwargs["using"] == "dense"
+    assert client.scroll.await_args.args[0] == generation.physical_name
+    assert client.query_points_groups.await_args.args[0] == generation.physical_name
+    assert client.query_points_groups.await_args.kwargs["using"] == "dense"
     stored = (await points(indexer, generation.physical_name))[
-        generate_point_id(f"note:{note.id}")
+        generate_point_id(f"chunk:{note.id}:0")
     ].vector["dense"]
-    assert client.query_points.await_args.kwargs["query"] == stored
+    assert client.query_points_groups.await_args.kwargs["query"] == stored
 
 
 async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):
@@ -374,23 +388,57 @@ async def test_unchanged_legacy_chunk_recovers_full_source_input(corpus):
     original = await points(indexer, indexer.logical_collection_name)
     generation = await ensure_notes_collection(indexer)
     migrated = await points(indexer, generation.physical_name)
-    assert migrated[chunk_id].payload["embedding_text"] == full_text
+    assert stored_embedding_text(migrated[chunk_id].payload) == full_text
     assert migrated[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
     assert any(full_text in call.args[0] for call in indexer.embedder.embed_all.await_args_list)
     await indexer.index_all()
-    assert (await points(indexer, generation.physical_name))[chunk_id].payload[
-        "embedding_text"
-    ] == full_text
+    assert (
+        stored_embedding_text((await points(indexer, generation.physical_name))[chunk_id].payload)
+        == full_text
+    )
     assert await points(indexer, indexer.logical_collection_name) == original
 
 
-async def test_confirmed_external_delete_omits_note_group_only(corpus):
+async def test_missing_legacy_source_fails_closed_instead_of_inferred_deletion(corpus):
     indexer, note = corpus
+    before = await points(indexer, indexer.logical_collection_name)
     indexer.note_store.get_note_path(note.id).unlink()
-    generation = await ensure_notes_collection(indexer)
-    result = await points(indexer, generation.physical_name)
-    assert {point.payload["type"] for point in result.values()} == {"fact", "glossary"}
-    assert len(await points(indexer, indexer.logical_collection_name)) == 4
+    with pytest.raises(
+        EmbeddingMigrationError, match="complete retained embedding input is missing"
+    ):
+        await ensure_notes_collection(indexer)
+    assert (
+        await active_embedding_collection(indexer.storage, indexer.logical_collection_name)
+        == indexer.logical_collection_name
+    )
+    assert await points(indexer, indexer.logical_collection_name) == before
+
+
+async def test_owned_retained_metadata_only_summary_with_missing_source_fails_closed(
+    corpus, tmp_path
+):
+    indexer, note = corpus
+    foreign_store = NoteStore(tmp_path / "foreign-first")
+    foreign_store.ensure_directories()
+    foreign = NoteIndexer(foreign_store, indexer.storage, indexer.embedder, indexer.global_vocab)
+    foreign._collection_name = indexer.logical_collection_name
+    original = await ensure_notes_collection(foreign)
+    before = await points(indexer, original.physical_name)
+    indexer.note_store.get_note_path(note.id).unlink()
+    replacement = NoteIndexer(
+        indexer.note_store,
+        indexer.storage,
+        model(namespace="next-deployment"),
+        indexer.global_vocab,
+    )
+    with pytest.raises(EmbeddingMigrationError, match="legacy metadata-only summaries"):
+        await ensure_notes_collection(replacement)
+    assert (
+        await active_embedding_collection(indexer.storage, indexer.logical_collection_name)
+        == original.physical_name
+    )
+    assert await points(indexer, original.physical_name) == before
+    await replacement.embedder.close()
 
 
 async def test_changed_chunk_boundaries_rebuild_complete_unchanged_note(corpus, monkeypatch):
@@ -403,7 +451,7 @@ async def test_changed_chunk_boundaries_rebuild_complete_unchanged_note(corpus, 
     client = await indexer.storage.get_client()
     await client.delete_payload(
         indexer.logical_collection_name,
-        keys=["embedding_text"],
+        keys=["embedding_text", "embedding_text_field", "embedding_fragment"],
         points=[generate_point_id(f"chunk:{note.id}:0")],
         wait=True,
     )
@@ -416,7 +464,7 @@ async def test_changed_chunk_boundaries_rebuild_complete_unchanged_note(corpus, 
         (point.payload for point in result.values() if point.payload["type"] == "chunk"),
         key=lambda payload: payload["chunk_index"],
     )
-    assert [chunk["embedding_text"] for chunk in chunks] == expected
+    assert [stored_embedding_text(chunk) for chunk in chunks] == expected
     assert result[generate_point_id(f"note:{note.id}")].payload["source_reindex_pending"]
 
 
@@ -648,7 +696,10 @@ async def test_migration_reads_one_snapshot_for_all_notes_and_finalizer(corpus, 
         )
     client = await indexer.storage.get_client()
     await client.delete_payload(
-        indexer.logical_collection_name, keys=["embedding_text"], points=added_ids, wait=True
+        indexer.logical_collection_name,
+        keys=["embedding_text", "embedding_text_field", "embedding_fragment"],
+        points=added_ids,
+        wait=True,
     )
     indexer.note_store.update(original.id, content="Changed content")
     snapshot = NotesMigration._snapshot

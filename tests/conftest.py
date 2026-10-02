@@ -1,6 +1,24 @@
 """Shared pytest fixtures for mcp-notes tests."""
 
+import atexit
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+# Override ambient data paths before settings imports. Service endpoints may
+# be explicitly opted into, but tests and their subprocesses always own their
+# caches, vocabulary, shared stores, and default note directory.
+_TEST_DATA = TemporaryDirectory(prefix="mcp-notes-tests-")
+TEST_DATA_DIR = Path(_TEST_DATA.name)
+atexit.register(_TEST_DATA.cleanup)
+for variable, directory in (
+    ("VECTOR_CACHE_DIR", "cache"),
+    ("VECTOR_SHARED_DATA_DIR", "shared"),
+    ("NOTES_DIR", "notes"),
+):
+    os.environ[variable] = str(TEST_DATA_DIR / directory)
+os.environ.setdefault("VECTOR_EMBEDDING_URL", "http://127.0.0.1:1")
+os.environ.setdefault("VECTOR_QDRANT_URL", "http://127.0.0.1:1")
 
 # Settings read the environment once, at import, and an unset embedding
 # dimension leaves collection creation raising "embedding_dim not yet
@@ -303,3 +321,5 @@ def pytest_sessionfinish(session, exitstatus):
         asyncio.run(cleanup())
     except Exception:
         pass
+    finally:
+        _TEST_DATA.cleanup()

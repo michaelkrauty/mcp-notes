@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from qdrant_client.models import FieldCondition, MatchValue
+from vector_core.storage.embedding_fragments import is_derived_fragment
 from vector_core.storage.embedding_migration import (
     CollectionGeneration,
     EmbeddingMigrationError,
     ensure_embedding_collection,
     resolve_shared_embedding_text,
 )
+from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.storage.parser import ParsedNote, parse_note
@@ -26,8 +28,9 @@ class NotesMigration:
     """Replace legacy note groups from a complete, readable source snapshot.
 
     Legacy summaries do not retain their embedding input, and chunk payloads
-    may be truncated. Replacing the whole group also reconciles external edits
-    and deletions without attaching fresh vectors to stale payloads.
+    may be truncated. Replacing readable source groups reconciles external edits
+    without attaching fresh vectors to stale payloads. Missing files are not
+    deletion evidence; complete retained inputs remain authoritative.
     """
 
     def __init__(self, indexer: NoteIndexer):
@@ -62,32 +65,48 @@ class NotesMigration:
             note_id = UUID(payload["note_id"])
             # Shared collections can contain notes owned by another directory.
             # Absence from this store is not evidence that those notes were deleted.
-            if not self.owns_note(note_id):
-                return await resolve_shared_embedding_text(payload)
-            source = self._source_notes().get(note_id)
-            if source is None or (
-                point_type == "note"
-                and self.indexer._hash_note(*source) != payload.get("note_hash")
+            if self.owns_note(note_id):
+                return self._resolve_owned_note(note_id, payload)
+        return await resolve_shared_embedding_text(payload)
+
+    def _resolve_owned_note(self, note_id: UUID, payload: dict[str, Any]) -> str | None:
+        path = self.indexer.note_store.get_note_path(note_id)
+        source = self._source_notes().get(note_id) if path is not None and path.is_file() else None
+        if source is None:
+            return self._retained_note_text(payload)
+        if payload["type"] == "note":
+            if (
+                self.indexer._hash_note(*source) != payload.get("note_hash")
+                or payload.get("index_policy") != self.indexer._index_policy()
             ):
                 self._rebuild_ids.add(note_id)
                 return None
-            if point_type == "chunk":
-                if note_id not in self._chunk_texts:
-                    self._chunk_texts[note_id] = [chunk.content for chunk in chunk_note(source[0])]
-                texts = self._chunk_texts[note_id]
-                index = payload.get("chunk_index")
-                if (
-                    isinstance(index, int)
-                    and 0 <= index < len(texts)
-                    and texts[index] == payload.get("embedding_text", payload.get("content"))
-                ):
-                    return texts[index]
-                # Truncation and changed chunk boundaries are indistinguishable
-                # from retained text alone. Rebuild the complete source group.
-                self._rebuild_ids.add(note_id)
-                return None
             return generate_note_summary(source[0])
-        return await resolve_shared_embedding_text(payload)
+        if note_id not in self._chunk_texts:
+            self._chunk_texts[note_id] = [
+                chunk.content for chunk in chunk_note(source[0], self.indexer.embedder)
+            ]
+        texts = self._chunk_texts[note_id]
+        index = payload.get("chunk_index")
+        if (
+            isinstance(index, int)
+            and 0 <= index < len(texts)
+            and texts[index] == payload.get("embedding_text", payload.get("content"))
+        ):
+            return texts[index]
+        self._rebuild_ids.add(note_id)
+        return None
+
+    @staticmethod
+    def _retained_note_text(payload: dict[str, Any]) -> str:
+        text = stored_embedding_text(payload)
+        if text is not None and payload.get("embedding_text_source") != "legacy-note-metadata":
+            return text
+        raise EmbeddingMigrationError(
+            "Original note source is unavailable and complete retained embedding input is missing; "
+            "legacy metadata-only summaries or potentially truncated chunks "
+            "cannot establish coverage"
+        )
 
     def _snapshot(self) -> dict[UUID, tuple[ParsedNote, str | None]]:
         root = self.indexer.note_store.notes_dir
@@ -121,6 +140,8 @@ class NotesMigration:
         summaries: set[UUID] = set()
         chunks: set[UUID] = set()
         for payload in payloads:
+            if is_derived_fragment(payload):
+                continue
             if payload.get("type") not in {"note", "chunk"}:
                 continue
             note_id = UUID(payload["note_id"])
@@ -128,7 +149,14 @@ class NotesMigration:
                 continue
             (summaries if payload["type"] == "note" else chunks).add(note_id)
             await self.resolve_text(payload)
-        self._rebuild_ids.update(chunks - summaries)
+        readable_orphans = {
+            note_id
+            for note_id in chunks - summaries
+            if (path := self.indexer.note_store.get_note_path(note_id)) is not None
+            and path.is_file()
+        }
+        if readable_orphans:
+            self._rebuild_ids.update(readable_orphans & self._source_notes().keys())
         if not self._rebuild_ids:
             return
         # Complete the scan before changing candidate points. Unlike iter_all,
@@ -150,8 +178,8 @@ class NotesMigration:
         )
         candidate._collection_name = physical_name
         for note_id in self._rebuild_ids:
-            await candidate._delete_note_points(note_id)
             if note_id in notes:
+                await candidate._delete_note_points(note_id)
                 await candidate._index_note(*notes[note_id])
                 # New source tokens have not joined the live vocabulary yet.
                 # Keep this note eligible for the ordinary full index pass,
@@ -172,11 +200,13 @@ async def ensure_notes_collection(
 ) -> CollectionGeneration:
     """Make the complete mixed collection ready before an operation."""
     migration = NotesMigration(indexer)
+    await indexer._ensure_global_vocab()
     return await ensure_embedding_collection(
         indexer.storage,
         indexer.logical_collection_name,
         indexer.embedder,
         migration.resolve_text,
         finalize_candidate=migration.finalize,
+        vectorize=indexer.global_vocab.vectorize_document,
         lock_held=lock_held,
     )

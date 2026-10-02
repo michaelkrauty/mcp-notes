@@ -107,6 +107,8 @@ class NoteChunk(BaseModel):
     section_title: str | None = None
     start_line: int
     end_line: int
+    start_char: int = 0
+    end_char: int = 0
 
 
 class CategoryTree(BaseModel):

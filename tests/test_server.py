@@ -28,6 +28,7 @@ from mcp_notes.server import (
     update_note,
 )
 from mcp_notes.services.note_service import NoteService
+from mcp_notes.settings import settings
 
 from .conftest import requires_full_stack
 
@@ -303,14 +304,14 @@ def qdrant_available() -> bool:
     import httpx
 
     try:
-        response = httpx.get("http://localhost:6333/collections", timeout=2.0)
+        response = httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0)
         return response.status_code == 200
     except Exception:
         return False
 
 
 requires_qdrant = pytest.mark.skipif(
-    not qdrant_available(), reason="Qdrant not available at localhost:6333"
+    not qdrant_available(), reason="Configured Qdrant service is unavailable"
 )
 
 
