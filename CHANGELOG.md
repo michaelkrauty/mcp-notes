@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-10-01
+
+### Fixed
+
+- Update vector-core to v1.6.1 to avoid duplicating retained content while preserving explicit embedding inputs, and to bound migration upserts by payload size.
+
 ## [1.2.0] - 2026-10-01
 
 ### Added
