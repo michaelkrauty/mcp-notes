@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.2] - 2026-10-04
+
+### Changed
+
+- Pin vector-core to v1.8.1 for embedding gateway retry fixes.
+
 ## [1.3.1] - 2026-10-02
 
 ### Changed
