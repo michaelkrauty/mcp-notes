@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,10 +19,14 @@ from vector_core.storage.embedding_migration import (
 from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
+from mcp_notes.storage.filesystem import NoteTooLargeError, read_note_text
 from mcp_notes.storage.parser import ParsedNote, parse_note
 
 if TYPE_CHECKING:
     from mcp_notes.indexing.indexer import NoteIndexer
+
+
+logger = logging.getLogger(__name__)
 
 
 class NotesMigration:
@@ -125,7 +130,14 @@ class NotesMigration:
                 if not name.endswith(".md") or (base / name).is_symlink():
                     continue
                 path = base / name
-                parsed = parse_note(path.read_text(encoding="utf-8"))
+                try:
+                    text = read_note_text(path)
+                except NoteTooLargeError as e:
+                    # Like the indexer's own scan, an oversized note has no
+                    # usable source; its points fall back to retained input.
+                    logger.warning(f"Skipping oversized note source: {e}")
+                    continue
+                parsed = parse_note(text)
                 if parsed.id in notes:
                     raise EmbeddingMigrationError("Duplicate note identifiers in source directory")
                 category = str(base.relative_to(root))

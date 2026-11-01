@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.7] - 2026-11-01
+
+### Fixed
+
+- `NOTES_MAX_NOTE_SIZE_KB` now bounds every read of a note file, not only `read_note` (#69). Listing notes, the health check, link resolution, indexing at startup, note updates and moves, and the embedding-migration source scan all read the whole file first, so a single huge `.md` file copied or restored into the notes directory could exhaust memory despite the limit. All of them now go through one reader that checks the size on the open file and never reads more than one byte past the limit, so a file that grows while it is being read is still refused. Bulk scans record an oversized note as a parse error, so it shows up in `check_note_health`, and keep going; the migration scan treats it as an unavailable source. The deleted-note check identifies an oversized note from the first `NOTES_MAX_NOTE_SIZE_KB` of its file.
+
+### Changed
+
+- The limit is compared in exact bytes (`NOTES_MAX_NOTE_SIZE_KB * 1024`). `read_note` previously rounded the size down to whole kilobytes, so it accepted files up to just under one kilobyte over the limit.
+
 ## [1.3.6] - 2026-11-01
 
 ### Fixed
