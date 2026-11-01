@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.3] - 2026-10-31
+
+### Fixed
+
+- Note-level search results carry an excerpt again. Since 1.3.0 a note's summary point keeps its text as the retained embedding input instead of `content`, and the result converter read only `content`, so every `result_type: "note"` hit from hybrid search, the note roll-up, and filter-only listings came back with an empty excerpt. (#88)
+
 ## [1.3.2] - 2026-10-04
 
 ### Changed
