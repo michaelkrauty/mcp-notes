@@ -178,6 +178,9 @@ class NoteIndexer:
         Pass 1: Collect tokens from all content and register with GlobalVocabulary
         Pass 2: Generate embeddings and sparse vectors, upsert to Qdrant
 
+        Notes pass 2 does not finish keep their registration corrected to what
+        is actually stored for them.
+
         Args:
             force: If True, reindex everything. If False, incremental update.
 
@@ -190,6 +193,8 @@ class NoteIndexer:
         # Get existing indexed notes
         if not force:
             indexed = await self._get_indexed_hashes()
+            # Notes with points before pass 2, for vocabulary reconciliation
+            previously_stored = set(indexed)
         else:
             indexed = {}
             # Shared collections can contain notes from other source roots.
@@ -206,12 +211,19 @@ class NoteIndexer:
             }
             for note_id in owned:
                 await self._delete_note_points(note_id)
+            # Only groups owned by another source root are still stored
+            previously_stored = {
+                payload["note_id"]
+                for payload in payloads
+                if payload.get("type") in {"note", "chunk"}
+                and UUID(payload["note_id"]) not in owned
+            }
 
         pending = {note_id for note_id, note_hash in indexed.items() if not note_hash}
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)
-        notes_to_index: list[tuple[ParsedNote, str | None]] = []
+        notes_to_index: list[tuple[ParsedNote, str | None, list[set[str]]]] = []
         tokens_per_doc: list[set[str]] = []
         total_notes = 0
 
@@ -219,16 +231,14 @@ class NoteIndexer:
             total_notes += 1
             note_hash = self._hash_note(parsed, category)
 
-            # Check if this note needs indexing
-            if force or str(parsed.id) not in indexed or indexed[str(parsed.id)] != note_hash:
-                notes_to_index.append((parsed, category))
-
             # Collect tokens for GlobalVocabulary (needs ALL notes for IDF statistics)
-            summary = generate_note_summary(parsed)
-            tokens_per_doc.append(set(self.global_vocab.tokenize(summary)))
+            note_tokens = self._note_token_sets(parsed)
+            tokens_per_doc.extend(note_tokens)
 
-            for chunk in chunk_note(parsed, self.embedder):
-                tokens_per_doc.append(set(self.global_vocab.tokenize(chunk.content)))
+            # Check if this note needs indexing; keep its registered sets in
+            # case pass 2 does not finish it
+            if force or str(parsed.id) not in indexed or indexed[str(parsed.id)] != note_hash:
+                notes_to_index.append((parsed, category, note_tokens))
 
         # Register this codebase's vocabulary
         self.global_vocab.register_codebase(NOTES_CODEBASE_ID, tokens_per_doc)
@@ -244,20 +254,37 @@ class NoteIndexer:
 
         # Pass 2: Index notes with embeddings and sparse vectors
         indexed_count = 0
-        for parsed, category in notes_to_index:
-            try:
-                new_chunk_count = await self._index_note(parsed, category)
-                if not force:
-                    # Incremental re-index can shrink a note; upsert replaces
-                    # same-ID chunks but cannot remove the chunks left over from a
-                    # previous, larger version. Prune them. In force mode the
-                    # owned groups were cleared, so no orphans are possible.
-                    await self._delete_orphan_chunks(parsed.id, new_chunk_count)
-                await self._complete_note_index(parsed, category)
-                pending.discard(str(parsed.id))
-                indexed_count += 1
-            except Exception as e:
-                logger.error(f"Failed to index note {parsed.id}: {e}")
+        started = 0
+        finished: set[UUID] = set()
+        try:
+            for parsed, category, _ in notes_to_index:
+                started += 1
+                try:
+                    new_chunk_count = await self._index_note(parsed, category)
+                    if not force:
+                        # Incremental re-index can shrink a note; upsert replaces
+                        # same-ID chunks but cannot remove the chunks left over from a
+                        # previous, larger version. Prune them. In force mode the
+                        # owned groups were cleared, so no orphans are possible.
+                        await self._delete_orphan_chunks(parsed.id, new_chunk_count)
+                    await self._complete_note_index(parsed, category)
+                    finished.add(parsed.id)
+                    pending.discard(str(parsed.id))
+                    indexed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to index note {parsed.id}: {e}")
+        finally:
+            # Runs on cancellation too, best-effort: an interrupted pass leaves
+            # the current note part written and later notes unwritten, all
+            # registered by pass 1 as if indexed.
+            await self._reconcile_unfinished_notes(
+                [
+                    (parsed.id, registered, position < started)
+                    for position, (parsed, _, registered) in enumerate(notes_to_index)
+                    if parsed.id not in finished
+                ],
+                previously_stored,
+            )
 
         logger.info(f"Indexed {indexed_count}/{len(notes_to_index)} notes")
 
@@ -286,7 +313,9 @@ class NoteIndexer:
     #
     # Single-note writes keep the notes contribution to GlobalVocabulary
     # current with incremental deltas instead of re-registering the whole
-    # corpus on every write. Two invariants keep sparse retrieval honest:
+    # corpus on every write; index_all re-registers it from the source notes
+    # and then corrects it for any note it failed to write. Two invariants keep
+    # sparse retrieval honest:
     #
     # 1. A note's terms are in the vocabulary before the note is vectorized.
     #    ``vectorize_document`` silently drops unknown tokens, so a term
@@ -303,6 +332,12 @@ class NoteIndexer:
     # repeated edits cannot leak document frequency. Derived fragments are
     # dense slices of the same text, not further documents.
     # ------------------------------------------------------------------
+
+    def _note_token_sets(self, parsed: ParsedNote) -> list[set[str]]:
+        """Token sets for the points ``_index_note`` writes: the summary, then each chunk."""
+        texts = [generate_note_summary(parsed)]
+        texts.extend(chunk.content for chunk in chunk_note(parsed, self.embedder))
+        return [set(self.global_vocab.tokenize(text)) for text in texts]
 
     async def _indexed_token_sets(self, note_id: UUID) -> list[set[str]]:
         """Token sets currently registered for a note, one per stored canonical point.
@@ -398,6 +433,51 @@ class NoteIndexer:
             stored = previous
         self._update_vocabulary(stored, registered, len(stored) - len(registered))
 
+    async def _reconcile_unfinished_notes(
+        self,
+        unfinished: list[tuple[UUID, list[set[str]], bool]],
+        previously_stored: set[str],
+    ) -> None:
+        """Make index_all's registration describe what its unfinished notes left stored.
+
+        Pass 1 registers every source note's new token sets so pass 2 can
+        vectorize them, but a note whose write raised, or that a cancelled pass
+        interrupted or never reached, keeps whatever is stored: its old points,
+        nothing, or a partial mix. A later ``index_note`` reads that back and
+        retires it, so the contribution must hold the stored sets rather than
+        the registered ones. All corrections go out as one delta.
+
+        Each entry is ``(note_id, registered sets, whether pass 2 started it)``;
+        ``previously_stored`` holds the IDs of notes with points before pass 2.
+        A note pass 2 never started that had no points still has none, so it
+        needs no read. A failed read falls back to that for a note that had no
+        points. One that had points keeps its registered sets, since its old
+        ones are unknown, and the next ``index_all`` repairs it.
+        """
+        added: list[set[str]] = []
+        removed: list[set[str]] = []
+        for note_id, registered, started in unfinished:
+            had_points = str(note_id) in previously_stored
+            stored: list[set[str]] = []
+            if started or had_points:
+                try:
+                    stored = await self._indexed_token_sets(note_id)
+                except Exception as e:
+                    if had_points:
+                        logger.warning(
+                            f"Could not read unfinished note {note_id} back after "
+                            f"index_all; its vocabulary contribution stays as registered: {e}"
+                        )
+                        continue
+                    logger.warning(
+                        f"Could not read unfinished note {note_id} back after "
+                        f"index_all; assuming it stored nothing: {e}"
+                    )
+            added.extend(stored)
+            removed.extend(registered)
+        if removed:
+            self._update_vocabulary(added, removed, len(added) - len(removed))
+
     async def index_note(self, note_id: UUID) -> None:
         """Index one note into a compatible generation."""
         async with self.collection_operation():
@@ -428,15 +508,8 @@ class NoteIndexer:
         parsed = parse_note(note.content)
         category = note.category  # Category from path
 
-        # One token set per point, matching index_all's registration
-        chunks = chunk_note(parsed, self.embedder)
-        summary = generate_note_summary(parsed)
-
-        added: list[set[str]] = [set(self.global_vocab.tokenize(summary))]
-        for chunk in chunks:
-            added.append(set(self.global_vocab.tokenize(chunk.content)))
-
         # Register the delta before _index_note vectorizes (invariant 1)
+        added = self._note_token_sets(parsed)
         removed = await self._indexed_token_sets(note_id)
         applied = self._update_vocabulary(added, removed, len(added) - len(removed))
 

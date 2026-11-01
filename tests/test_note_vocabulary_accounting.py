@@ -1,10 +1,12 @@
-"""Single-note writes keep the shared sparse vocabulary equal to the indexed notes.
+"""Note writes keep the shared sparse vocabulary equal to the indexed notes.
 
 index_all registers one vocabulary document per canonical point: the note
-summary plus each chunk. Edits and deletes must leave the contribution exactly
-where a fresh registration of the stored corpus would put it.
+summary plus each chunk. Edits, deletes and failed writes, including notes an
+index_all pass does not finish, must leave the contribution exactly where a
+fresh registration of the stored corpus would put it.
 """
 
+import asyncio
 import sqlite3
 from collections import Counter
 from unittest.mock import AsyncMock
@@ -411,3 +413,186 @@ async def test_failed_vocabulary_write_is_never_compensated(notes_vocab, monkeyp
     # Inverting the delta that never landed would reach the real database.
     assert len(calls) == 1
     assert contribution(vocab) == before
+
+
+# index_all registers every source note before pass 2 writes it. A note that
+# pass 2 does not finish must end up registered as what is actually stored for
+# it, so that a later index_note retry swaps exactly that.
+
+
+def fail_note_writes(monkeypatch, note_id, stage, error=None):
+    """Fail one note's summary group ("nothing" new stored) or second chunk ("partial")."""
+    original = indexer_module.upsert_fragment_group
+
+    async def failing(storage, collection, points):
+        payload = points[0].payload
+        target = (
+            payload.get("type") == "note"
+            if stage == "nothing"
+            else (payload.get("chunk_index") == 1)
+        )
+        if payload.get("note_id") == str(note_id) and target:
+            raise error or RuntimeError("injected write failure")
+        await original(storage, collection, points)
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", failing)
+    return original
+
+
+@pytest.mark.parametrize("stage", ["nothing", "partial"])
+@pytest.mark.parametrize("force", [False, True])
+async def test_index_all_registers_failed_new_note_as_stored(
+    notes_vocab, monkeypatch, force, stage
+):
+    indexer, vocab = notes_vocab
+    store = indexer.note_store
+    good = store.create("Good", paragraphs("good", 2))
+    bad = store.create("Bad", paragraphs("bad", 3))
+    if force:
+        # A force pass clears both groups before rewriting them.
+        await indexer.index_note(good.id)
+        await indexer.index_note(bad.id)
+    original = fail_note_writes(monkeypatch, bad.id, stage)
+
+    status = await indexer.index_all(force=force)
+
+    assert status.index_healthy is False
+    stored = await stored_token_sets(indexer)
+    assert contribution(vocab) == registration(stored)
+    if stage == "nothing":
+        assert vocab.get_codebase_doc_count(NOTES_CODEBASE_ID) == point_count(indexer, good.id)
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", original)
+    await indexer.index_note(bad.id)
+    assert contribution(vocab) == registration(source_token_sets(indexer))
+
+
+@pytest.mark.parametrize("stage", ["nothing", "partial"])
+async def test_index_all_registers_failed_existing_note_as_stored(notes_vocab, monkeypatch, stage):
+    indexer, vocab = notes_vocab
+    store = indexer.note_store
+    good = store.create("Good", paragraphs("good", 2))
+    bad = store.create("Bad", paragraphs("old", 6))
+    await indexer.index_note(good.id)
+    await indexer.index_note(bad.id)
+    store.update(bad.id, content=paragraphs("new", 3))
+    original = fail_note_writes(monkeypatch, bad.id, stage)
+
+    assert (await indexer.index_all()).index_healthy is False
+
+    # The old points, or a mix of the new summary and leading chunk with the
+    # old trailing chunks, are what the retry will read back and retire.
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+    # The last old paragraph survives either way, in an old trailing chunk.
+    assert vocab._get_doc_freq()["oldfoxtrot"] > 0
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", original)
+    await indexer.index_note(bad.id)
+    assert contribution(vocab) == registration(source_token_sets(indexer))
+    assert vocab._get_doc_freq().get("oldfoxtrot", 0) == 0
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_index_all_unreadable_note_without_points_is_assumed_to_store_nothing(
+    notes_vocab, monkeypatch, caplog, force
+):
+    indexer, vocab = notes_vocab
+    good = indexer.note_store.create("Good", paragraphs("good", 2))
+    bad = indexer.note_store.create("Bad", paragraphs("bad", 3))
+    if force:
+        # New, or cleared by the force pass: either way it had no points.
+        await indexer.index_note(good.id)
+        await indexer.index_note(bad.id)
+    fail_note_writes(monkeypatch, bad.id, "nothing")
+    monkeypatch.setattr(
+        indexer, "_indexed_token_sets", AsyncMock(side_effect=RuntimeError("injected read"))
+    )
+
+    await indexer.index_all(force=force)
+
+    assert "assuming it stored nothing" in caplog.text
+    assert vocab.get_codebase_doc_count(NOTES_CODEBASE_ID) == point_count(indexer, good.id)
+    assert vocab._get_doc_freq().get("badalpha", 0) == 0
+
+
+async def test_index_all_unreadable_existing_note_keeps_its_registration(
+    notes_vocab, monkeypatch, caplog
+):
+    indexer, vocab = notes_vocab
+    good = indexer.note_store.create("Good", paragraphs("good", 2))
+    bad = indexer.note_store.create("Bad", paragraphs("old", 3))
+    await indexer.index_note(good.id)
+    await indexer.index_note(bad.id)
+    indexer.note_store.update(bad.id, content=paragraphs("new", 2))
+    fail_note_writes(monkeypatch, bad.id, "nothing")
+    monkeypatch.setattr(
+        indexer, "_indexed_token_sets", AsyncMock(side_effect=RuntimeError("injected read"))
+    )
+
+    await indexer.index_all()
+
+    # Its old sets are unknown, so nothing is retired in their place.
+    assert "stays as registered" in caplog.text
+    assert contribution(vocab) == registration(source_token_sets(indexer))
+
+
+async def test_index_all_reconciliation_failure_is_logged_not_raised(
+    notes_vocab, monkeypatch, caplog
+):
+    indexer, vocab = notes_vocab
+    indexer.note_store.create("Good", paragraphs("good", 2))
+    bad = indexer.note_store.create("Bad", paragraphs("bad", 3))
+    fail_note_writes(monkeypatch, bad.id, "nothing")
+    calls = []
+
+    def locked(*args, **kwargs):
+        calls.append(kwargs)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(vocab, "update_codebase_incremental", locked)
+
+    status = await indexer.index_all()
+
+    assert status.index_healthy is False
+    assert len(calls) == 1
+    assert "Failed to update the notes vocabulary contribution" in caplog.text
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_cancelled_index_all_registers_unfinished_notes_as_stored(
+    notes_vocab, monkeypatch, force
+):
+    indexer, vocab = notes_vocab
+    notes = [
+        indexer.note_store.create(title, paragraphs(f"old{title.lower()}", 4))
+        for title in ("First", "Second", "Third")
+    ]
+    for note in notes:
+        await indexer.index_note(note.id)
+    for note in notes:
+        indexer.note_store.update(note.id, content=paragraphs("new", 3))
+
+    original = indexer_module.upsert_fragment_group
+    order: list[str] = []
+
+    async def cancelling(storage, collection, points):
+        payload = points[0].payload
+        if payload.get("type") == "note" and payload["note_id"] not in order:
+            order.append(payload["note_id"])
+        # Cancel partway through the second note: the first is finished, the
+        # second part written and the third never reached.
+        if order[1:] == [payload["note_id"]] and payload.get("chunk_index") == 1:
+            raise asyncio.CancelledError
+        await original(storage, collection, points)
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", cancelling)
+    with pytest.raises(asyncio.CancelledError):
+        await indexer.index_all(force=force)
+    assert len(order) == 2
+
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", original)
+    for note in notes:
+        await indexer.index_note(note.id)
+    assert contribution(vocab) == registration(source_token_sets(indexer))
