@@ -40,7 +40,6 @@ from vector_core.storage.hybrid import HybridSearcher
 from vector_core.storage.hybrid import SearchResult as HybridResult
 
 from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
-from mcp_notes.indexing.migration import ensure_notes_collection
 from mcp_notes.models import SearchResult
 from mcp_notes.search.converters import convert_payload
 from mcp_notes.search.filters import (
@@ -132,8 +131,9 @@ class NoteSearchEngine:
             embedder=self.embedder,
             global_vocab=self.global_vocab,
         )
-        generation = await ensure_notes_collection(indexer)
-        return generation.physical_name
+        # A search can publish a migration; the operation registers it.
+        async with indexer.collection_operation() as generation:
+            return generation.physical_name
 
     async def _readable_collection(self) -> tuple[str, CircuitBreakerOpenError | None]:
         try:
