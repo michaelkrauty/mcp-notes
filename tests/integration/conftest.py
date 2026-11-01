@@ -1,9 +1,10 @@
 """Integration test fixtures for mcp-notes."""
 
-import asyncio
 from uuid import uuid4
 
 import pytest
+
+from ..conftest import delete_test_collection_sync, track_test_collection
 
 
 @pytest.fixture
@@ -53,39 +54,17 @@ def integration_notes_dir(tmp_path, monkeypatch):
 
     # Track collection name for cleanup
     from vector_core import generate_collection_name
-    collection_name = generate_collection_name(
-        str(notes_dir),
-        prefix=settings.collection_prefix,
+    collection_name = track_test_collection(
+        generate_collection_name(
+            str(notes_dir),
+            prefix=settings.collection_prefix,
+        )
     )
 
     yield notes_dir
 
-    # Cleanup: Delete Qdrant collection
-    async def cleanup_collection():
-        from vector_core import QdrantStorage
-        storage = QdrantStorage()
-        try:
-            if await storage.collection_exists(collection_name):
-                await storage.delete_collection(collection_name)
-        except Exception:
-            pass
-        finally:
-            try:
-                await storage.close()
-            except Exception:
-                pass
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(cleanup_collection())
-        else:
-            loop.run_until_complete(cleanup_collection())
-    except (RuntimeError, Exception):
-        try:
-            asyncio.run(cleanup_collection())
-        except Exception:
-            pass
+    # Cleanup: delete the test collection, its alias and generations from Qdrant
+    delete_test_collection_sync(collection_name)
 
     # Restore sync singleton state using SyncSingleton API
     singletons_module._note_store.set_instance(original_store)

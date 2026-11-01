@@ -118,6 +118,75 @@ requires_full_stack = pytest.mark.skipif(
 )
 
 
+# Logical collection names created by full-stack tests, deleted again at the end
+# of the session in case a test died before its own teardown ran.
+_TEST_COLLECTIONS: set[str] = set()
+
+
+async def delete_test_collection(logical_name: str) -> None:
+    """Delete everything stored for a test's logical collection name.
+
+    A logical name is an alias (``<name>__active``) for the physical
+    ``vcgen_*`` collection of its current embedding generation, so deleting a
+    collection called ``logical_name`` alone removes nothing. This removes the
+    alias, every generation whose manifest names ``logical_name``, and a legacy
+    collection that still uses the name directly. Logical names in tests are
+    unique per temporary directory, so nothing else matches. Best-effort:
+    Qdrant may be unavailable.
+    """
+    from qdrant_client.models import DeleteAlias, DeleteAliasOperation  # noqa: PLC0415
+    from vector_core.storage.qdrant import QdrantStorage  # noqa: PLC0415
+
+    storage = QdrantStorage()
+    try:
+        client = await storage.get_client()
+        alias = f"{logical_name}__active"
+        if any(found.alias_name == alias for found in (await client.get_aliases()).aliases):
+            await client.update_collection_aliases(
+                change_aliases_operations=[
+                    DeleteAliasOperation(delete_alias=DeleteAlias(alias_name=alias))
+                ]
+            )
+        for collection in (await client.get_collections()).collections:
+            name = collection.name
+            if name != logical_name:
+                if not name.startswith("vcgen_"):
+                    continue
+                metadata = await storage.get_metadata(name) or {}
+                if metadata.get("embedding_generation", {}).get("logical_name") != logical_name:
+                    continue
+            await client.delete_collection(name)
+    except Exception:
+        pass  # Cleanup failure shouldn't fail the test
+    finally:
+        try:
+            await storage.close()
+        except Exception:
+            pass
+    _TEST_COLLECTIONS.discard(logical_name)
+
+
+def delete_test_collection_sync(logical_name: str) -> None:
+    """Run ``delete_test_collection`` from synchronous fixture teardown.
+
+    Runs on its own thread and event loop so it neither depends on nor
+    disturbs a loop the test may have left behind.
+    """
+    import threading  # noqa: PLC0415
+
+    thread = threading.Thread(
+        target=lambda: asyncio.run(delete_test_collection(logical_name)), daemon=True
+    )
+    thread.start()
+    thread.join(timeout=30.0)
+
+
+def track_test_collection(logical_name: str) -> str:
+    """Record a logical collection name for the end-of-session sweep."""
+    _TEST_COLLECTIONS.add(logical_name)
+    return logical_name
+
+
 @pytest.fixture
 def mock_collection_mutation(monkeypatch):
     """Stub the writer boundary explicitly for mocked tool tests only."""
@@ -201,45 +270,17 @@ def tmp_notes_dir(tmp_path, monkeypatch):
     # Track collection name for cleanup
     from vector_core.storage.qdrant import generate_collection_name
 
-    collection_name = generate_collection_name(
-        str(notes_dir),
-        prefix=settings.collection_prefix,
+    collection_name = track_test_collection(
+        generate_collection_name(
+            str(notes_dir),
+            prefix=settings.collection_prefix,
+        )
     )
 
     yield notes_dir
 
-    # Cleanup: Delete the test collection from Qdrant
-    # Note: This cleanup is best-effort - failures are logged but don't fail tests
-    async def cleanup_collection():
-        from vector_core.storage.qdrant import QdrantStorage
-
-        storage = QdrantStorage()
-        try:
-            if await storage.collection_exists(collection_name):
-                await storage.delete_collection(collection_name)
-        except Exception:
-            # Cleanup failure shouldn't fail the test - Qdrant may be unavailable
-            pass
-        finally:
-            try:
-                await storage.close()
-            except Exception:
-                pass
-
-    # Use a separate thread to run cleanup to avoid event loop conflicts
-    import threading
-
-    def run_cleanup_sync():
-        """Run cleanup in a new event loop on a separate thread."""
-
-        def _run():
-            asyncio.run(cleanup_collection())
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-        thread.join(timeout=5.0)  # Wait up to 5 seconds for cleanup
-
-    run_cleanup_sync()
+    # Cleanup: delete the test collection, its alias and generations from Qdrant
+    delete_test_collection_sync(collection_name)
 
     # Restore sync singleton state using set_instance
     singletons_module._note_store.set_instance(original_store)
@@ -301,6 +342,9 @@ def pytest_sessionfinish(session, exitstatus):
     from vector_core.storage.qdrant import QdrantStorage
 
     async def cleanup():
+        # Collections whose test died before its teardown ran
+        for logical_name in sorted(_TEST_COLLECTIONS):
+            await delete_test_collection(logical_name)
         storage = QdrantStorage()
         try:
             collections = await storage.list_collections(prefix="notes_")
