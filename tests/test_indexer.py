@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from qdrant_client.models import FieldCondition, MatchAny
 from vector_core.storage.qdrant import QdrantStorage
 
 from mcp_notes.indexing.indexer import NoteIndexer
@@ -380,8 +381,12 @@ class TestNoteIndexerIndexAll:
             await indexer.index_all(force=True)
 
         mock_storage.delete_points.assert_not_called()
+        # The stored-group listing is the only scan.
         mock_storage.scroll_points.assert_awaited_once_with(
-            indexer.collection_name, payload_fields=["type", "note_id"], max_results=0
+            indexer.collection_name,
+            filter_conditions=[FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))],
+            payload_fields=["note_id", "embedding_fragment"],
+            max_results=0,
         )
 
 

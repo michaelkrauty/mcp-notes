@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.6] - 2026-11-01
+
+### Fixed
+
+- Notes whose markdown file was deleted outside the server (git checkout or pull, a restore, a manual delete) are removed from the index by the next `index_all`, incremental or forced (#64). Before, their points stayed searchable indefinitely and the index still reported healthy, and since forced reindexing only cleared notes it could still locate on disk, even `reindex_notes(force=True)` could leave them behind. A note counts as deleted only when no file under the notes directory belongs to it, so a note that fails to parse keeps its points. Nothing is removed when the notes directory is missing or cannot be fully read, and an incremental pass also removes nothing when the directory holds no notes at all; both report the index unhealthy, and a forced reindex is needed to clear an emptied directory.
+- A forced reindex no longer clears the points of a note whose file exists but fails to parse.
+- Notes that keep their points without a parsed source, such as a note whose file fails to parse or a deleted note that could not be removed yet, stay counted in the notes vocabulary statistics, so deleting or repairing such a note later keeps those statistics exact.
+
+### Added
+
+- Note and chunk points record the notes directory that wrote them in a `notes_root` payload field (a short hash of the resolved path), so a shared collection (`VECTOR_COLLECTION_NAME`) can remove only its own deleted notes. Existing points gain the field in place on the next incremental index, without reindexing. In a shared collection, deleted notes indexed before this release carry no marker and are kept with a warning; in the default per-directory collection they are removed.
 ## [1.3.5] - 2026-11-01
 
 ### Fixed
