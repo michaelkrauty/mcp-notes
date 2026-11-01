@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.9] - 2026-11-01
+
+### Fixed
+
+- The test suite passes without Qdrant or an embedding service (#92). 74 tests that drive the tools (note CRUD, tags, categories, history and restore, links, MCP resources, glossary) failed offline because binding the notes collection makes a real embedding request to resolve the embedding identity, even where a test only checks files, git or metadata. They now opt into an `offline_collection` fixture that backs the tools with an in-memory Qdrant and a deterministic embedder that never reaches the network. Tests marked `requires_full_stack` cannot use it and still run against the real services. The offline suite now passes in full, and in about 40 seconds instead of several minutes of connection retries.
+
 ## [1.3.8] - 2026-11-01
 
 ### Changed
