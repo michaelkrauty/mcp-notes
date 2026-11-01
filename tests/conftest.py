@@ -241,6 +241,104 @@ def mock_collection_mutation(monkeypatch):
 
 
 @pytest.fixture
+async def offline_collection(request, tmp_path, monkeypatch):
+    """Back the tools' notes collection with an in-process stack, by opt-in.
+
+    Binding the notes collection resolves the embedding identity with a real
+    embedding request, so any tool that indexes needs Qdrant and an embedding
+    service, even in a test whose subject is the filesystem, git, metadata or
+    the glossary store. A test that opts in gets singletons whose indexer and
+    search engine share one in-memory Qdrant database and use deterministic
+    embedders that never reach the network. The configured services are
+    ignored either way, so an opted-in test behaves the same with or without
+    them. Every other test, every requires_full_stack test included, keeps
+    the configured services; a full-stack test cannot opt in.
+
+    Yields the in-memory database, for tests that inspect what was stored.
+    """
+    from qdrant_client import AsyncQdrantClient  # noqa: PLC0415
+    from vector_core import EmbeddingClient, QdrantStorage  # noqa: PLC0415
+    from vector_core.settings import settings as vector_settings  # noqa: PLC0415
+
+    import mcp_notes.singletons as singletons_module  # noqa: PLC0415
+
+    if requires_full_stack.mark in request.node.iter_markers("skipif"):
+        raise RuntimeError(f"{request.node.nodeid} requires the full stack; it cannot run offline")
+
+    database = AsyncQdrantClient(location=":memory:")
+    dimension = vector_settings.embedding_dim
+    handles: list[QdrantStorage | EmbeddingClient] = []
+
+    class SharedDatabaseStorage(QdrantStorage):
+        """A handle onto the test's database, like a connection to one server.
+
+        Closing a handle releases it but leaves the database open: the
+        indexer and search engine close their handles independently, and the
+        fixture owns the database.
+        """
+
+        def _new_client(self) -> AsyncQdrantClient:
+            return database
+
+        async def close(self) -> None:
+            self._client = None
+            await super().close()
+
+    def offline_storage() -> QdrantStorage:
+        storage = SharedDatabaseStorage(url="http://offline.invalid", embedding_dim=dimension)
+        handles.append(storage)
+        return storage
+
+    def offline_embedder() -> EmbeddingClient:
+        client = EmbeddingClient(
+            base_url="http://offline.invalid",
+            model="offline-model",
+            dim=dimension,
+            profile="raw",
+            cache_namespace="offline",
+            cache_path=tmp_path / "offline-embeddings.db",
+        )
+        client.resolve_identity = AsyncMock(return_value=client.configured_identity())
+        client._embed_prepared_batch = AsyncMock(
+            side_effect=lambda texts: [[1.0] + [0.0] * (dimension - 1) for _ in texts]
+        )
+        handles.append(client)
+        return client
+
+    def offline(component):
+        return lambda note_store: component(
+            note_store=note_store, storage=offline_storage(), embedder=offline_embedder()
+        )
+
+    # The getters build the indexer and search engine, and the glossary and
+    # fact indexers borrow the indexer's storage and embedder, so patching
+    # these two constructors covers every vector client the tools reach, and
+    # keeps covering them when a test resets or cleans up the singletons.
+    monkeypatch.setattr(singletons_module, "NoteIndexer", offline(singletons_module.NoteIndexer))
+    monkeypatch.setattr(
+        singletons_module, "NoteSearchEngine", offline(singletons_module.NoteSearchEngine)
+    )
+    async_singletons = (
+        singletons_module._indexer,
+        singletons_module._search_engine,
+        singletons_module._glossary_indexer,
+        singletons_module._fact_indexer,
+        singletons_module._note_service,
+    )
+    for singleton in async_singletons:
+        singleton.reset()
+
+    yield database
+
+    # Later tests must not inherit instances bound to a closed database.
+    for singleton in async_singletons:
+        singleton.reset()
+    for handle in handles:
+        await handle.close()
+    await database.close()
+
+
+@pytest.fixture
 def tmp_notes_dir(tmp_path, monkeypatch):
     """Create temporary notes directory and configure settings."""
     notes_dir = tmp_path / "notes"

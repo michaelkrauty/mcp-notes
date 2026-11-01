@@ -6,6 +6,9 @@ import pytest
 
 from ..conftest import claim_notes_test_collection, delete_test_collection_sync
 
+# Git history and link resolution are the subject here, not the vector index.
+pytestmark = pytest.mark.usefixtures("offline_collection")
+
 
 class TestNoteVersioning:
     """Tests for note version history and restore."""

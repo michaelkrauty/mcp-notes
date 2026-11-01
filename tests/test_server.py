@@ -122,6 +122,7 @@ class TestResourceManagement:
         assert inspect.iscoroutinefunction(cleanup_async_resources)
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestCreateNote:
     """Tests for create_note tool."""
 
@@ -165,6 +166,7 @@ class TestCreateNote:
         assert result["category"] == "work/projects"
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestReadNote:
     """Tests for read_note tool."""
 
@@ -200,6 +202,7 @@ class TestReadNote:
         assert "not found" in result["message"].lower()
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestUpdateNote:
     """Tests for update_note tool."""
 
@@ -262,6 +265,7 @@ class TestUpdateNote:
         assert "not found" in result["message"].lower()
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestDeleteNote:
     """Tests for delete_note tool."""
 
@@ -359,6 +363,7 @@ class TestSearchNotes:
         assert len(results) <= 3
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestListNotes:
     """Tests for list_notes tool."""
 
@@ -510,6 +515,7 @@ class TestGetFactsWithStaleSources:
         assert not any("error_code" in r for r in result)
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestListTags:
     """Tests for list_tags tool."""
 
@@ -534,6 +540,7 @@ class TestListTags:
         assert "python" in tag_names or any("python" in str(t) for t in results)
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestListCategories:
     """Tests for list_categories tool."""
 
@@ -557,6 +564,7 @@ class TestListCategories:
         assert results is not None
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestFindSimilarNotes:
     """Tests for find_similar_notes tool."""
 
@@ -585,6 +593,7 @@ class TestFindSimilarNotes:
         assert isinstance(result, list)
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestGetNoteHistory:
     """Tests for get_note_history tool."""
 
@@ -625,6 +634,7 @@ class TestRestoreNoteVersion:
         assert "Invalid UUID" in result["message"]
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestDeletedNoteRecovery:
     """End-to-end recovery of deleted notes via history + restore (issue #13)."""
 
@@ -680,6 +690,7 @@ class TestDeletedNoteRecovery:
         assert "delet" in result["message"].lower()
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestGetNoteLinks:
     """Tests for get_note_links tool."""
 
@@ -707,6 +718,7 @@ class TestGetNoteLinks:
         assert "outgoing" in result or "error" not in result
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestReindexNotes:
     """Tests for reindex_notes tool."""
 
@@ -721,6 +733,7 @@ class TestReindexNotes:
         assert "total_notes" in result or "indexed_notes" in result
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestRenameTag:
     """Tests for rename_tag tool."""
 
@@ -776,6 +789,7 @@ class TestRenameTag:
         assert note["tags"] == ["bar"]
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestMergeTags:
     """Tests for merge_tags tool."""
 
@@ -808,6 +822,7 @@ class TestMergeTags:
         assert result["updated_count"] == 2
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestMoveCategory:
     """Tests for move_category tool."""
 
@@ -905,6 +920,7 @@ class TestMoveCategory:
         )
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestDeleteUpdateRace:
     """A concurrent rename during delete must not leave the note in git HEAD.
 
@@ -1000,6 +1016,7 @@ class TestDeleteUpdateRace:
         )
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestListNotesSort:
     """Tests for list_notes sorting options."""
 
@@ -1055,6 +1072,7 @@ class TestCleanupAsyncResources:
         assert not singletons_module._indexer.is_initialized
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestMCPResources:
     """Tests for MCP resource endpoints."""
 
@@ -1221,6 +1239,7 @@ class TestValidationFunctions:
         assert normalized == "my-tag"
 
 
+@pytest.mark.usefixtures("offline_collection")
 class TestHealthAndDiagnostics:
     """Tests for health and diagnostic functions."""
 

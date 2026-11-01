@@ -16,6 +16,10 @@ from mcp_notes.server import (
     update_glossary_entry,
 )
 
+# Glossary writes index the entry into the notes collection, which these tests
+# never examine: they cover the glossary store and the tool contract.
+pytestmark = pytest.mark.usefixtures("offline_collection")
+
 
 class TestGlossarySingletons:
     """Tests for glossary singleton getters."""
