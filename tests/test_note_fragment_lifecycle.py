@@ -231,7 +231,7 @@ async def test_partial_note_write_remains_pending_and_incremental_retry_repairs(
 
 @pytest.mark.parametrize("incomplete", ["partial_write", "policy"])
 @pytest.mark.parametrize("present", [False, True])
-async def test_bulk_health_retains_missing_source_pending_state(
+async def test_bulk_health_retains_unreadable_source_pending_state(
     notes_index, monkeypatch, incomplete, present
 ):
     indexer, note = notes_index
@@ -256,7 +256,9 @@ async def test_bulk_health_retains_missing_source_pending_state(
         for p in await payloads(indexer, generation.physical_name)
         if p.get("note_id") == str(note.id)
     ]
-    path.unlink()
+    # The file still exists but no longer parses, so its group is retained;
+    # a deleted file would remove it instead.
+    path.write_text("not a note")
     if present:
         other = indexer.note_store.create("Available", "AVAILABLE_TAIL complete source")
     status = await indexer.index_all()

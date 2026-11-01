@@ -12,8 +12,10 @@ from uuid import UUID
 from qdrant_client.models import (
     FieldCondition,
     Filter,
+    IsEmptyCondition,
     MatchAny,
     MatchValue,
+    PayloadField,
     PayloadSchemaType,
     PointStruct,
     Range,
@@ -50,6 +52,9 @@ logger = logging.getLogger(__name__)
 # Codebase ID for GlobalVocabulary registration
 NOTES_CODEBASE_ID = "notes"
 NOTE_INDEX_VERSION = "complete-spans-v1"
+# Payload field naming the notes directory that wrote a note or chunk point.
+# Not part of the note hash or index policy, so adding it reindexes nothing.
+NOTES_ROOT_KEY = "notes_root"
 
 # Physical names of migrated generations this process published and then
 # registered with the vocabulary. Process-wide, because the indexer a search
@@ -88,6 +93,7 @@ class NoteIndexer:
         self.embedder = embedder or EmbeddingClient()
         self._global_vocab = global_vocab  # Use singleton if None
         self._collection_name: str | None = None
+        self._notes_root: str | None = None
         self._operation_generation: ContextVar[tuple[object, CollectionGeneration] | None] = (
             ContextVar("notes_collection_generation", default=None)
         )
@@ -131,6 +137,14 @@ class NoteIndexer:
                 prefix=settings.collection_prefix,
             )
         return self._collection_name
+
+    @property
+    def notes_root(self) -> str:
+        """Stable, non-reversible identifier of the notes directory, stored on its points."""
+        if self._notes_root is None:
+            resolved = str(self.note_store.base_dir.resolve())
+            self._notes_root = hashlib.sha256(resolved.encode()).hexdigest()[:16]
+        return self._notes_root
 
     @asynccontextmanager
     async def collection_operation(self) -> AsyncIterator[CollectionGeneration]:
@@ -188,8 +202,10 @@ class NoteIndexer:
         Pass 1: Collect tokens from all content and register with GlobalVocabulary
         Pass 2: Generate embeddings and sparse vectors, upsert to Qdrant
 
-        Notes pass 2 does not finish keep their registration corrected to what
-        is actually stored for them.
+        Between the passes, notes whose markdown file is gone are removed from
+        the index; pass 1 has already left them out of the registration. Notes
+        pass 2 does not finish keep their registration corrected to what is
+        actually stored for them.
 
         Args:
             force: If True, reindex everything. If False, incremental update.
@@ -200,35 +216,10 @@ class NoteIndexer:
         await self._ensure_global_vocab()
         await self.ensure_collection()
 
+        # Notes with points before pass 2, including chunk-only groups
+        stored = await self._stored_note_ids()
         # Get existing indexed notes
-        if not force:
-            indexed = await self._get_indexed_hashes()
-            # Notes with points before pass 2, for vocabulary reconciliation
-            previously_stored = set(indexed)
-        else:
-            indexed = {}
-            # Shared collections can contain notes from other source roots.
-            # Clear only groups whose ownership is known to this source store.
-            ownership = NotesMigration(self)
-            payloads = await self.storage.scroll_points(
-                self.collection_name, payload_fields=["type", "note_id"], max_results=0
-            )
-            owned = {
-                UUID(payload["note_id"])
-                for payload in payloads
-                if payload.get("type") in {"note", "chunk"}
-                and ownership.owns_note(UUID(payload["note_id"]))
-            }
-            for note_id in owned:
-                await self._delete_note_points(note_id)
-            # Only groups owned by another source root are still stored
-            previously_stored = {
-                payload["note_id"]
-                for payload in payloads
-                if payload.get("type") in {"note", "chunk"}
-                and UUID(payload["note_id"]) not in owned
-            }
-
+        indexed = {} if force else await self._get_indexed_hashes()
         pending = {note_id for note_id, note_hash in indexed.items() if not note_hash}
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
@@ -236,9 +227,11 @@ class NoteIndexer:
         notes_to_index: list[tuple[ParsedNote, str | None, list[set[str]]]] = []
         tokens_per_doc: list[set[str]] = []
         total_notes = 0
+        seen: set[str] = set()
 
         for parsed, category in self.note_store.iter_all():
             total_notes += 1
+            seen.add(str(parsed.id))
             note_hash = self._hash_note(parsed, category)
 
             # Collect tokens for GlobalVocabulary (needs ALL notes for IDF statistics)
@@ -253,13 +246,27 @@ class NoteIndexer:
         # Register this codebase's vocabulary
         self.global_vocab.register_codebase(NOTES_CODEBASE_ID, tokens_per_doc)
 
+        # For vocabulary reconciliation; force mode first clears what it rewrites
+        previously_stored = stored - seen if force else stored
+        if force:
+            # Clear the groups pass 2 rewrites from this store's source notes.
+            # Other stored groups are another root's, or have no readable
+            # source and are left to _remove_vanished_notes.
+            for note_id in stored & seen:
+                await self._delete_note_points(UUID(note_id))
+        else:
+            await self._mark_notes_root(stored & seen)
+        vanished_removed = await self._remove_vanished_notes(
+            stored - seen, found_notes=bool(seen), force=force
+        )
+
         if not notes_to_index:
             logger.info("No notes to index")
             return IndexStatus(
                 total_notes=total_notes,
                 indexed_notes=total_notes,
                 last_indexed=datetime.now(UTC),
-                index_healthy=not pending,
+                index_healthy=not pending and vanished_removed,
             )
 
         # Pass 2: Index notes with embeddings and sparse vectors
@@ -301,10 +308,10 @@ class NoteIndexer:
         # Account for notes that were already up to date (skipped this pass) plus
         # the ones we just indexed successfully. A note whose indexing raised is
         # not counted as indexed, and the index is only healthy if every note that
-        # needed indexing succeeded.
+        # needed indexing succeeded and every deleted note was removed.
         previously_indexed = total_notes - len(notes_to_index)
         indexed_notes = previously_indexed + indexed_count
-        index_healthy = indexed_count == len(notes_to_index) and not pending
+        index_healthy = indexed_count == len(notes_to_index) and not pending and vanished_removed
         if not index_healthy:
             logger.warning(
                 f"Indexing incomplete: {indexed_count}/{len(notes_to_index)} "
@@ -323,8 +330,9 @@ class NoteIndexer:
     #
     # Single-note writes keep the notes contribution to GlobalVocabulary
     # current with incremental deltas instead of re-registering the whole
-    # corpus on every write; index_all re-registers it from the source notes
-    # and then corrects it for any note it failed to write, and a process that
+    # corpus on every write; index_all re-registers it from the source notes,
+    # removes the notes whose file is gone, which that leaves out, and then
+    # corrects it for any note it failed to write, and a process that
     # publishes a migrated generation registers what that generation stores.
     # Two invariants keep sparse retrieval honest:
     #
@@ -650,6 +658,7 @@ class NoteIndexer:
                 "index_policy": "",
                 "source_reindex_pending": True,
                 "embedding_text": summary,
+                NOTES_ROOT_KEY: self.notes_root,
             },
         )
 
@@ -676,6 +685,7 @@ class NoteIndexer:
                     "category": category,  # From path, not frontmatter
                     "created": parsed.created.isoformat(),
                     "modified": parsed.modified.isoformat(),
+                    NOTES_ROOT_KEY: self.notes_root,
                 },
             )
             points.append(chunk_point)
@@ -751,6 +761,134 @@ class NoteIndexer:
             ),
             wait=True,
         )
+
+    async def _stored_note_ids(self) -> set[str]:
+        """IDs of the notes with canonical note or chunk points in the bound generation."""
+        payloads = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[FieldCondition(key="type", match=MatchAny(any=["note", "chunk"]))],
+            payload_fields=["note_id", FRAGMENT_KEY],
+            max_results=0,
+        )
+        return {
+            payload["note_id"]
+            for payload in payloads
+            if payload.get("note_id") and not is_derived_fragment(payload)
+        }
+
+    async def _remove_vanished_notes(
+        self, unseen: set[str], *, found_notes: bool, force: bool
+    ) -> bool:
+        """Remove this store's notes whose markdown file is gone from the index.
+
+        ``unseen`` holds the stored notes the source scan did not return. A
+        note is gone only if no file under the notes directory is its own, so
+        a note that fails to parse keeps its points. Nothing is removed when
+        the directory cannot be fully read, or, unless forced, when it holds
+        no notes at all: an unmounted or misconfigured directory must not
+        empty the index. Pass 1 left these notes out of the vocabulary
+        registration, so a removed note needs no delta.
+
+        Returns:
+            Whether every vanished note this store owns was removed; False
+            also when the directory could not be checked
+        """
+        if not unseen:
+            return True
+        try:
+            on_disk = {str(note_id) for note_id in self.note_store.note_ids_on_disk()}
+        except OSError as e:
+            logger.warning(
+                f"Could not scan {self.note_store.notes_dir} for deleted notes; "
+                f"keeping every indexed note: {e}"
+            )
+            return False
+        vanished = await self._owned_note_ids(unseen - on_disk)
+        if not vanished:
+            return True
+        if not found_notes and not force:
+            logger.warning(
+                f"No notes found in {self.note_store.notes_dir}; keeping the "
+                f"{len(vanished)} indexed note(s) whose file is missing. "
+                "A forced reindex removes them."
+            )
+            return False
+        removed = 0
+        for note_id in vanished:
+            try:
+                await self._delete_note_points(UUID(note_id))
+                removed += 1
+            except Exception as e:
+                logger.error(f"Failed to remove deleted note {note_id} from the index: {e}")
+        logger.info(f"Removed {removed}/{len(vanished)} deleted notes from the index")
+        return removed == len(vanished)
+
+    async def _owned_note_ids(self, note_ids: set[str]) -> set[str]:
+        """The notes among ``note_ids`` whose stored points this notes directory wrote.
+
+        Each point names the directory that wrote it in ``notes_root``.
+        Unmarked points predate the marker: in a collection dedicated to this
+        directory they are its own, but a shared collection
+        (``VECTOR_COLLECTION_NAME``) may hold them for another directory, so
+        they are kept and counted in a warning.
+        """
+        if not note_ids:
+            return set()
+        payloads = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="note_id", match=MatchAny(any=sorted(note_ids))),
+                FieldCondition(key="type", match=MatchAny(any=["note", "chunk"])),
+            ],
+            payload_fields=["note_id", NOTES_ROOT_KEY, FRAGMENT_KEY],
+            max_results=0,
+        )
+        roots: dict[str, set[str | None]] = {}
+        for payload in payloads:
+            if not is_derived_fragment(payload):
+                roots.setdefault(payload["note_id"], set()).add(payload.get(NOTES_ROOT_KEY))
+        dedicated = not settings.collection_name
+        owned: set[str] = set()
+        unmarked = 0
+        for note_id, markers in roots.items():
+            marked = markers - {None}
+            if marked == {self.notes_root} or (not marked and dedicated):
+                owned.add(note_id)
+            elif not marked:
+                unmarked += 1
+        if unmarked:
+            logger.warning(
+                f"Keeping {unmarked} deleted note(s) indexed before points named their notes "
+                f"directory: the shared collection {self.logical_collection_name} may hold "
+                "them for another directory"
+            )
+        return owned
+
+    async def _mark_notes_root(self, note_ids: set[str]) -> None:
+        """Stamp the notes directory marker on source notes indexed before it existed.
+
+        An unchanged note is not rewritten, and a shared collection removes a
+        vanished note only by its marker. A failure is logged and the next
+        pass retries.
+        """
+        if not note_ids:
+            return
+        try:
+            client = await self.storage.get_client()
+            await client.set_payload(
+                self.collection_name,
+                payload={NOTES_ROOT_KEY: self.notes_root},
+                points=Filter(
+                    must=[
+                        FieldCondition(key="note_id", match=MatchAny(any=sorted(note_ids))),
+                        FieldCondition(key="type", match=MatchAny(any=["note", "chunk"])),
+                        IsEmptyCondition(is_empty=PayloadField(key=NOTES_ROOT_KEY)),
+                    ]
+                ),
+                wait=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not mark indexed notes with their notes directory: {e}")
 
     async def _get_indexed_hashes(self) -> dict[str, str]:
         """Get map of note_id -> hash for indexed notes."""

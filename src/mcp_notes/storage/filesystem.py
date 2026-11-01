@@ -3,6 +3,7 @@
 import fcntl
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -23,11 +24,16 @@ from mcp_notes.storage.parser import (
 )
 from mcp_notes.storage.slugify import (
     build_filename,
+    extract_uuid_from_filename,
     slugify_category_path,
 )
 from mcp_notes.storage.uuid_index import UUIDIndex
 
 logger = logging.getLogger(__name__)
+
+_UUID_PATTERN = re.compile(
+    rb"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -700,6 +706,47 @@ class NoteStore:
             logger.error(
                 f"Failed to parse {len(parse_errors)} note(s). Use get_parse_errors() for details."
             )
+
+    def note_ids_on_disk(self) -> set[UUID]:
+        """
+        Get the UUID of every note file under notes_dir, whether or not it parses.
+
+        Unlike iter_all, nothing is skipped silently, so an unreadable note is
+        never mistaken for a deleted one. A file counts for the UUID in its
+        name. A file named otherwise counts for its parsed id, or, if it does
+        not parse, for every UUID its text mentions. Symlinked directories are
+        not descended, as in iter_all.
+
+        Returns:
+            Set of note UUIDs with a markdown file on disk
+
+        Raises:
+            OSError: If notes_dir is missing or any part of it cannot be read
+        """
+
+        def on_error(error: OSError) -> None:
+            raise error
+
+        note_ids: set[UUID] = set()
+        for directory, _, files in os.walk(self.notes_dir, onerror=on_error):
+            for name in files:
+                if not name.endswith(".md"):
+                    continue
+                note_id = extract_uuid_from_filename(name)
+                if note_id is not None:
+                    note_ids.add(note_id)
+                    continue
+                path = Path(directory) / name
+                if path.is_symlink():
+                    continue
+                content = path.read_bytes()
+                try:
+                    note_ids.add(parse_note(content.decode("utf-8")).id)
+                except Exception:
+                    note_ids.update(
+                        UUID(match.decode()) for match in _UUID_PATTERN.findall(content)
+                    )
+        return note_ids
 
     def get_parse_errors(self) -> list[NoteParseError]:
         """
