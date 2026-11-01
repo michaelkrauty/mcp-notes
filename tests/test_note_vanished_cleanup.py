@@ -239,6 +239,33 @@ async def test_note_whose_file_no_longer_parses_is_kept(notes, force, named):
     }
 
 
+@pytest.mark.parametrize("force", [False, True])
+async def test_oversized_note_that_cannot_be_identified_is_kept(notes, monkeypatch, force):
+    indexer, _ = notes
+    store = indexer.note_store
+    store.create("Keeper", paragraphs("kept", 2))
+    buried = store.create("Buried", paragraphs("buried", 2))
+    path = store.get_note_path(buried.id).rename(store.notes_dir / "handwritten.md")
+    store.uuid_index.rebuild()
+    await indexer.index_all()
+    before = await all_points(indexer, buried.id)
+    assert before
+
+    # Over the size limit with its id behind a long title: the bounded
+    # deleted-note check cannot see the id, so nothing may be removed.
+    monkeypatch.setattr(settings, "max_note_size_kb", 1)
+    path.write_text(
+        f"---\ntitle: {'T' * 4096}\nid: {buried.id}\n"
+        "created: '2026-01-01T00:00:00+00:00'\nmodified: '2026-01-01T00:00:00+00:00'\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+    status = await indexer.index_all(force=force)
+
+    assert await all_points(indexer, buried.id) == before
+    assert status.index_healthy is False
+
+
 async def test_empty_notes_directory_removes_nothing_unless_forced(notes, caplog):
     indexer, vocab = notes
     store = indexer.note_store

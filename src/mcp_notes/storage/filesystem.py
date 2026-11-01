@@ -36,6 +36,38 @@ _UUID_PATTERN = re.compile(
 )
 
 
+def read_note_text(path: Path) -> str:
+    """
+    Read a note file, refusing one larger than max_note_size_kb.
+
+    The size is checked on the open file, and at most one byte past the limit
+    is ever read, so a note that grows between the check and the read is still
+    refused without being loaded whole. Newlines are translated as text-mode
+    reading does.
+
+    Raises:
+        NoteTooLargeError: If the file exceeds max_note_size_kb
+        OSError: If the file cannot be read
+        UnicodeDecodeError: If the file is not valid UTF-8
+    """
+    limit = settings.max_note_size_kb * 1024
+    with path.open("rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        data = f.read(limit + 1) if size <= limit else b""
+    if size > limit or len(data) > limit:
+        size_kb = (max(size, len(data)) + 1023) // 1024
+        raise NoteTooLargeError(path, size_kb, settings.max_note_size_kb)
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _read_note_prefix(path: Path) -> tuple[bytes, bool]:
+    """Read at most max_note_size_kb of a file, and whether more of it was left unread."""
+    limit = settings.max_note_size_kb * 1024
+    with path.open("rb") as f:
+        data = f.read(limit + 1)
+    return data[:limit], len(data) > limit
+
+
 def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
     """
     Atomically write content to a file using temp file + rename.
@@ -450,12 +482,8 @@ class NoteStore:
             self.uuid_index.rebuild_if_path_missing(note_id)
             raise NoteNotFoundError(f"Note not found: {note_id}")
 
-        # Check file size before reading into memory
-        size_kb = path.stat().st_size // 1024
-        if size_kb > settings.max_note_size_kb:
-            raise NoteTooLargeError(path, size_kb, settings.max_note_size_kb)
-
-        content = path.read_text(encoding="utf-8")
+        # Refuses an oversized note before reading it into memory
+        content = read_note_text(path)
         parsed = parse_note(content)
 
         # Derive category from path
@@ -498,6 +526,7 @@ class NoteStore:
 
         Raises:
             NoteNotFoundError: If note doesn't exist
+            NoteTooLargeError: If the stored note exceeds max_note_size_kb
             TimeoutError: If unable to acquire file lock
         """
         # Lock on UUID (stable) BEFORE reading path (unstable) to prevent race condition
@@ -510,7 +539,7 @@ class NoteStore:
                 # Path in index but file missing - thread-safe rebuild
                 self.uuid_index.rebuild_if_path_missing(note_id)
                 raise NoteNotFoundError(f"Note not found: {note_id}")
-            existing_content = old_path.read_text(encoding="utf-8")
+            existing_content = read_note_text(old_path)
             parsed = parse_note(existing_content)
             old_category = self._category_from_path(old_path)
 
@@ -652,7 +681,7 @@ class NoteStore:
         # Security: Use _safe_rglob to skip symlinks and escaped paths
         for path in _safe_rglob(self.notes_dir, "*.md"):
             try:
-                content = path.read_text(encoding="utf-8")
+                content = read_note_text(path)
                 parsed = parse_note(content)
                 category = self._category_from_path(path)
                 summaries.append(self._to_summary(parsed, category))
@@ -691,7 +720,7 @@ class NoteStore:
         # Security: Use _safe_rglob to skip symlinks and escaped paths
         for path in _safe_rglob(self.notes_dir, "*.md"):
             try:
-                content = path.read_text(encoding="utf-8")
+                content = read_note_text(path)
                 parsed = parse_note(content)
                 category = self._category_from_path(path)
                 yield (parsed, category)
@@ -714,14 +743,17 @@ class NoteStore:
         Unlike iter_all, nothing is skipped silently, so an unreadable note is
         never mistaken for a deleted one. A file counts for the UUID in its
         name. A file named otherwise counts for its parsed id, or, if it does
-        not parse, for every UUID its text mentions. Symlinked directories are
-        not descended, as in iter_all.
+        not parse, for every UUID its text mentions. Only the first
+        max_note_size_kb of a file is read; a larger file whose id cannot be
+        parsed from that much fails the scan rather than going uncounted.
+        Symlinked directories are not descended, as in iter_all.
 
         Returns:
             Set of note UUIDs with a markdown file on disk
 
         Raises:
-            OSError: If notes_dir is missing or any part of it cannot be read
+            OSError: If notes_dir is missing, any part of it cannot be read, or
+                an oversized note cannot be identified within the size limit
         """
 
         def on_error(error: OSError) -> None:
@@ -739,10 +771,18 @@ class NoteStore:
                 path = Path(directory) / name
                 if path.is_symlink():
                     continue
-                content = path.read_bytes()
+                content, truncated = _read_note_prefix(path)
+                # A cut-off prefix may end inside a multibyte character.
+                errors = "ignore" if truncated else "strict"
                 try:
-                    note_ids.add(parse_note(content.decode("utf-8")).id)
-                except Exception:
+                    note_ids.add(parse_note(content.decode("utf-8", errors=errors)).id)
+                except Exception as e:
+                    if truncated:
+                        # UUIDs in a cut-off prefix may not include the note's own
+                        # id, which could then pass for deleted.
+                        raise OSError(
+                            f"Cannot identify {path} from its first {settings.max_note_size_kb} KB"
+                        ) from e
                     note_ids.update(
                         UUID(match.decode()) for match in _UUID_PATTERN.findall(content)
                     )
@@ -800,7 +840,7 @@ class NoteStore:
             path = self._note_path(note_id)
             if not path.exists():
                 raise NoteNotFoundError(f"Note not found: {note_id}")
-        content = path.read_text(encoding="utf-8")
+        content = read_note_text(path)
         parsed = parse_note(content)
         category = self._category_from_path(path)
         return self._to_summary(parsed, category)
@@ -848,6 +888,7 @@ class NoteStore:
 
         Raises:
             NoteNotFoundError: If note doesn't exist
+            NoteTooLargeError: If the title must be read and the note exceeds max_note_size_kb
         """
         old_path = self._note_path(note_id)
         if not old_path.exists():
@@ -855,7 +896,7 @@ class NoteStore:
 
         # Get current title if not provided
         if new_title is None:
-            content = old_path.read_text(encoding="utf-8")
+            content = read_note_text(old_path)
             parsed = parse_note(content)
             new_title = parsed.title
 
