@@ -25,6 +25,7 @@ from mcp_notes.indexing import indexer as indexer_module
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
 from mcp_notes.indexing.migration import ensure_notes_collection
+from mcp_notes.search.engine import NoteSearchEngine
 from mcp_notes.settings import settings
 from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.parser import parse_note
@@ -32,13 +33,13 @@ from mcp_notes.storage.parser import parse_note
 WORDS = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
 
 
-def isolated_embedder(capacity):
+def isolated_embedder(capacity, namespace="vocabulary"):
     client = EmbeddingClient(
         model="isolated-model",
         dim=128,
         profile="raw",
         max_text_chars=capacity,
-        cache_namespace="vocabulary",
+        cache_namespace=namespace,
     )
     client.resolve_identity = AsyncMock(return_value=client.configured_identity())
     client._embed_prepared_batch = AsyncMock(
@@ -596,3 +597,128 @@ async def test_cancelled_index_all_registers_unfinished_notes_as_stored(
     for note in notes:
         await indexer.index_note(note.id)
     assert contribution(vocab) == registration(source_token_sets(indexer))
+
+
+# A migration rebuilds changed notes from their current source in the candidate
+# but leaves the vocabulary alone, so a failed candidate cannot change it. Once
+# published, the new generation is what is stored, and the process that
+# published it registers that before any single-note delta reads it back.
+
+
+@pytest.fixture
+async def migrating(notes_vocab, tmp_path):
+    """A changed note and a foreign note, with the next operation migrating."""
+    indexer, vocab = notes_vocab
+    note = indexer.note_store.create("Subject", paragraphs("first", 2))
+    await indexer.index_note(note.id)
+    original_points = point_count(indexer, note.id)
+    # Another source root sharing the collection is copied, never registered here.
+    other_store = NoteStore(tmp_path / "other-notes")
+    foreign = other_store.create("Foreign", "foreignterm body")
+    other = NoteIndexer(other_store, indexer.storage, indexer.embedder, vocab)
+    other._collection_name = (await ensure_notes_collection(indexer)).physical_name
+    await other._index_note(parse_note(foreign.content), None)
+    # The new version gains a chunk holding a term no other point has.
+    indexer.note_store.update(
+        note.id, content=paragraphs("first", 2) + "\n\nmigratedterm " + "filler " * 60
+    )
+    assert point_count(indexer, note.id) > original_points
+    changed = isolated_embedder(256, namespace="migrated")
+    replacement = NoteIndexer(indexer.note_store, indexer.storage, changed, vocab)
+    yield replacement, vocab, note
+    await changed.close()
+
+
+async def owned_stored_token_sets(indexer, note):
+    return [
+        set(indexer.global_vocab.tokenize(stored_embedding_text(payload)))
+        for payload in await stored_payloads(indexer)
+        if payload["note_id"] == str(note.id) and not is_derived_fragment(payload)
+    ]
+
+
+async def test_index_note_after_migration_registers_the_published_generation(migrating):
+    replacement, vocab, note = migrating
+
+    await replacement.index_note(note.id)
+
+    async with replacement.collection_operation() as generation:
+        assert generation.migrated
+    stored = await owned_stored_token_sets(replacement, note)
+    assert vocab.get_codebase_doc_count(NOTES_CODEBASE_ID) == len(stored)
+    assert len(stored) == point_count(replacement, note.id)
+    assert vocab._get_doc_freq()["migratedterm"] == 1
+    assert vocab._get_doc_freq().get("foreignterm", 0) == 0
+    assert contribution(vocab) == registration(stored)
+    assert contribution(vocab) == registration(source_token_sets(replacement))
+
+
+async def test_published_generation_is_registered_once(migrating, monkeypatch):
+    replacement, vocab, note = migrating
+    real = vocab.register_codebase
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vocab, "register_codebase", spy)
+    await replacement.index_note(note.id)
+    assert len(calls) == 1
+
+    # vector-core keeps returning the binding that published the generation.
+    async with replacement.collection_operation() as generation:
+        assert generation.migrated
+    await replacement.index_note(note.id)
+    await replacement.get_status()
+    assert len(calls) == 1
+
+
+async def test_failed_generation_registration_is_logged_and_retried(migrating, monkeypatch, caplog):
+    replacement, vocab, note = migrating
+    real = vocab.register_codebase
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vocab, "register_codebase", flaky)
+    await replacement.index_note(note.id)
+    assert "Could not register the published notes generation" in caplog.text
+
+    await replacement.get_status()
+    assert len(calls) == 2
+    stored = await owned_stored_token_sets(replacement, note)
+    assert contribution(vocab) == registration(stored)
+    await replacement.get_status()
+    assert len(calls) == 2
+
+
+async def test_generation_published_by_a_search_is_registered_once(migrating, monkeypatch):
+    replacement, vocab, note = migrating
+    real = vocab.register_codebase
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vocab, "register_codebase", spy)
+    # As in the server, the search engine owns a separate client, so the
+    # indexer's later bind does not see itself as the publisher.
+    reader = isolated_embedder(256, namespace="migrated")
+    try:
+        engine = NoteSearchEngine(replacement.note_store, replacement.storage, reader, vocab)
+        await engine.search("migratedterm", mode="chunk")
+        await engine.search("migratedterm", mode="chunk")
+    finally:
+        await reader.close()
+    assert len(calls) == 1
+
+    await replacement.index_note(note.id)
+    stored = await owned_stored_token_sets(replacement, note)
+    assert contribution(vocab) == registration(stored)
+    assert vocab._get_doc_freq()["migratedterm"] == 1

@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 NOTES_CODEBASE_ID = "notes"
 NOTE_INDEX_VERSION = "complete-spans-v1"
 
+# Physical names of migrated generations this process published and then
+# registered with the vocabulary. Process-wide, because the indexer a search
+# creates for one query can be the one that publishes.
+_registered_generations: set[str] = set()
+
 
 class NoteIndexer:
     """
@@ -129,7 +134,11 @@ class NoteIndexer:
 
     @asynccontextmanager
     async def collection_operation(self) -> AsyncIterator[CollectionGeneration]:
-        """Hold the migration lock and pin one physical target for a mutation."""
+        """Hold the migration lock and pin one physical target for a mutation.
+
+        A generation this process just published is registered with the
+        vocabulary before the operation runs.
+        """
         from mcp_notes.indexing.migration import ensure_notes_collection  # noqa: PLC0415
 
         binding = self._operation_generation.get()
@@ -140,6 +149,7 @@ class NoteIndexer:
             generation = await ensure_notes_collection(self, lock_held=True)
             token = self._operation_generation.set((asyncio.current_task(), generation))
             try:
+                await self._register_published_generation(generation)
                 yield generation
             finally:
                 self._operation_generation.reset(token)
@@ -314,8 +324,9 @@ class NoteIndexer:
     # Single-note writes keep the notes contribution to GlobalVocabulary
     # current with incremental deltas instead of re-registering the whole
     # corpus on every write; index_all re-registers it from the source notes
-    # and then corrects it for any note it failed to write. Two invariants keep
-    # sparse retrieval honest:
+    # and then corrects it for any note it failed to write, and a process that
+    # publishes a migrated generation registers what that generation stores.
+    # Two invariants keep sparse retrieval honest:
     #
     # 1. A note's terms are in the vocabulary before the note is vectorized.
     #    ``vectorize_document`` silently drops unknown tokens, so a term
@@ -339,17 +350,16 @@ class NoteIndexer:
         texts.extend(chunk.content for chunk in chunk_note(parsed, self.embedder))
         return [set(self.global_vocab.tokenize(text)) for text in texts]
 
-    async def _indexed_token_sets(self, note_id: UUID) -> list[set[str]]:
-        """Token sets currently registered for a note, one per stored canonical point.
+    async def _stored_token_sets(self, *conditions: FieldCondition) -> list[tuple[str, set[str]]]:
+        """``(note_id, tokens)`` for each stored canonical note or chunk point that matches.
 
-        An unindexed note has no points and contributes nothing. A point whose
-        payload predates retained embedding text still counts as a document,
-        just one without tokens.
+        A point whose payload predates retained embedding text still counts as
+        a document, just one without tokens.
         """
         payloads = await self.storage.scroll_points(
             self.collection_name,
             filter_conditions=[
-                FieldCondition(key="note_id", match=MatchValue(value=str(note_id))),
+                *conditions,
                 FieldCondition(key="type", match=MatchAny(any=["note", "chunk"])),
             ],
             # note_id keeps the projection non-empty for a point without text;
@@ -363,7 +373,7 @@ class NoteIndexer:
             ],
             max_results=0,
         )
-        token_sets: list[set[str]] = []
+        token_sets: list[tuple[str, set[str]]] = []
         for payload in payloads:
             if is_derived_fragment(payload):
                 continue
@@ -373,10 +383,49 @@ class NoteIndexer:
                 text = None
             if text is None:
                 text = payload.get("content")
-            token_sets.append(
-                set(self.global_vocab.tokenize(text)) if isinstance(text, str) else set()
-            )
+            tokens = set(self.global_vocab.tokenize(text)) if isinstance(text, str) else set()
+            token_sets.append((payload["note_id"], tokens))
         return token_sets
+
+    async def _indexed_token_sets(self, note_id: UUID) -> list[set[str]]:
+        """Token sets currently registered for a note, one per stored canonical point.
+
+        An unindexed note has no points and contributes nothing.
+        """
+        stored = await self._stored_token_sets(
+            FieldCondition(key="note_id", match=MatchValue(value=str(note_id)))
+        )
+        return [tokens for _, tokens in stored]
+
+    async def _register_published_generation(self, generation: CollectionGeneration) -> None:
+        """Register the notes contribution from a generation this process published.
+
+        A migration rebuilds changed notes from their current source in the
+        candidate but leaves the vocabulary alone, so a failed candidate can
+        never change it. Once published, the generation is what is stored,
+        and the single-note deltas that follow read it back as the registered
+        state, so register its canonical points owned by this store, as
+        index_all would. vector-core keeps returning the publishing binding,
+        so a process-wide memo makes this run once per generation. A failure
+        is logged and the next operation retries.
+        """
+        if not generation.migrated or generation.physical_name in _registered_generations:
+            return
+        try:
+            await self._ensure_global_vocab()
+            stored = await self._stored_token_sets()
+            ownership = NotesMigration(self)
+            owned = {note_id for note_id, _ in stored if ownership.owns_note(UUID(note_id))}
+            self.global_vocab.register_codebase(
+                NOTES_CODEBASE_ID, [tokens for note_id, tokens in stored if note_id in owned]
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not register the published notes generation "
+                f"{generation.physical_name} with the vocabulary; retrying next operation: {e}"
+            )
+            return
+        _registered_generations.add(generation.physical_name)
 
     def _update_vocabulary(
         self,

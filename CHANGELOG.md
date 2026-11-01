@@ -6,6 +6,7 @@
 
 - Editing or deleting a single note keeps the shared sparse vocabulary in step with what is indexed (#65). Every `index_note` added the note's summary and chunk documents again without removing the previous ones, so each edit inflated the notes document count and term frequencies until the next full index, skewing IDF for every codebase sharing the vocabulary database. A single-note write now reads the note's current token sets back from its stored points and swaps them for the new ones in one delta before vectorizing, so terms a note introduces reach its own sparse vectors. Deleting a note retires its documents once its points are gone.
 - A failed note write leaves the vocabulary describing what is actually stored. A write that fails partway through replacing a note's points, or a cancellation, is reconciled against the points read back afterwards, and `index_all` does the same for every note it registered but did not finish writing. A failed vocabulary write is logged and the note is still indexed.
+- A note write or search that publishes an embedding migration registers what the new generation stores. The migration rebuilds changed notes from their current source without touching the vocabulary, so the next single-note write cancelled against those rebuilt points and dropped the note's new terms and chunk count from the document statistics until the next full index.
 
 ### Changed
 
