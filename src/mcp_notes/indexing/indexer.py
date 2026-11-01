@@ -12,6 +12,7 @@ from uuid import UUID
 from qdrant_client.models import (
     FieldCondition,
     Filter,
+    MatchAny,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
@@ -26,6 +27,7 @@ from vector_core import (
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
 from vector_core.storage.embedding_fragments import (
+    FRAGMENT_KEY,
     fragment_point,
     is_derived_fragment,
     upsert_fragment_group,
@@ -34,6 +36,7 @@ from vector_core.storage.embedding_migration import (
     CollectionGeneration,
     embedding_collection_lock,
 )
+from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.indexing.migration import NotesMigration
@@ -278,6 +281,123 @@ class NoteIndexer:
             index_healthy=index_healthy,
         )
 
+    # ------------------------------------------------------------------
+    # Sparse vocabulary accounting
+    #
+    # Single-note writes keep the notes contribution to GlobalVocabulary
+    # current with incremental deltas instead of re-registering the whole
+    # corpus on every write. Two invariants keep sparse retrieval honest:
+    #
+    # 1. A note's terms are in the vocabulary before the note is vectorized.
+    #    ``vectorize_document`` silently drops unknown tokens, so a term
+    #    registered late never reaches the sparse vectors of the note that
+    #    introduced it.
+    # 2. The contribution describes exactly the indexed notes. Its document
+    #    count and document frequencies feed the IDF weights of every codebase
+    #    sharing the vocabulary database.
+    #
+    # As in index_all, each canonical point is one vocabulary document: the
+    # summary, whose text ``_index_note`` stores in ``embedding_text``, and
+    # each chunk, stored in ``content``. The removal side reads that stored
+    # text back, so adding and retiring a note tokenize the same text and
+    # repeated edits cannot leak document frequency. Derived fragments are
+    # dense slices of the same text, not further documents.
+    # ------------------------------------------------------------------
+
+    async def _indexed_token_sets(self, note_id: UUID) -> list[set[str]]:
+        """Token sets currently registered for a note, one per stored canonical point.
+
+        An unindexed note has no points and contributes nothing. A point whose
+        payload predates retained embedding text still counts as a document,
+        just one without tokens.
+        """
+        payloads = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="note_id", match=MatchValue(value=str(note_id))),
+                FieldCondition(key="type", match=MatchAny(any=["note", "chunk"])),
+            ],
+            # note_id keeps the projection non-empty for a point without text;
+            # scroll_points drops points whose payload comes back empty.
+            payload_fields=[
+                "note_id",
+                "embedding_text",
+                "embedding_text_field",
+                "content",
+                FRAGMENT_KEY,
+            ],
+            max_results=0,
+        )
+        token_sets: list[set[str]] = []
+        for payload in payloads:
+            if is_derived_fragment(payload):
+                continue
+            try:
+                text = stored_embedding_text(payload)
+            except ValueError:
+                text = None
+            if text is None:
+                text = payload.get("content")
+            token_sets.append(
+                set(self.global_vocab.tokenize(text)) if isinstance(text, str) else set()
+            )
+        return token_sets
+
+    def _update_vocabulary(
+        self,
+        added_tokens: list[set[str]],
+        removed_tokens: list[set[str]],
+        net_doc_change: int,
+    ) -> bool:
+        """Apply a notes vocabulary delta, logging rather than raising on failure.
+
+        Returns whether the delta reached the database. Callers must not
+        compensate for a delta that was never applied: inverting one that
+        failed would subtract tokens and documents that were never added.
+
+        A note write must not fail because the shared vocabulary database was
+        busy: a missed delta degrades sparse ranking, while a raised error would
+        lose the note. ``index_all`` re-registers the whole corpus and repairs
+        any drift.
+        """
+        try:
+            self.global_vocab.update_codebase_incremental(
+                NOTES_CODEBASE_ID,
+                added_tokens=added_tokens,
+                removed_tokens=removed_tokens,
+                net_doc_change=net_doc_change,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update the notes vocabulary contribution: {e}")
+            return False
+        return True
+
+    async def _revert_vocabulary_update(
+        self, note_id: UUID, registered: list[set[str]], previous: list[set[str]]
+    ) -> None:
+        """Make the contribution describe what a failed note write left stored.
+
+        ``_index_note`` embeds everything before writing, then replaces the
+        summary group and each chunk group in turn, and each group write
+        restores its previous points when it fails. A failure before the first
+        group write commits leaves the previous points intact. A later one
+        leaves a mix: the new summary and leading chunks beside the old trailing
+        ones, every new point plus orphaned old chunks if cleanup fails, or just
+        the new points if publishing the hash fails. Whatever is stored is what
+        the next write or delete reads back and retires, so read it back and
+        register that. If it cannot be read, assume nothing was written, as is
+        the case for a failed embed or a failure at the first Qdrant request.
+        """
+        try:
+            stored = await self._indexed_token_sets(note_id)
+        except Exception as e:
+            logger.warning(
+                f"Could not read note {note_id} back after a failed write; "
+                f"restoring its previous vocabulary contribution: {e}"
+            )
+            stored = previous
+        self._update_vocabulary(stored, registered, len(stored) - len(registered))
+
     async def index_note(self, note_id: UUID) -> None:
         """Index one note into a compatible generation."""
         async with self.collection_operation():
@@ -287,8 +407,11 @@ class NoteIndexer:
         """
         Index a single note using upsert-then-delete-orphans pattern.
 
-        Uses incremental vocabulary update for efficiency - only adds tokens
-        from this note instead of re-reading the entire corpus.
+        The note's stored token sets are swapped for its new ones in a single
+        vocabulary delta before the note is vectorized, so terms it introduces
+        reach its own sparse vectors and an edit never counts the note twice.
+        A failed vocabulary write is logged and indexing continues; a failed
+        note write makes the contribution match what was left stored.
 
         Data integrity: Uses upsert-then-delete-orphans to ensure notes remain
         searchable even if indexing partially fails. Old chunks are only deleted
@@ -305,41 +428,63 @@ class NoteIndexer:
         parsed = parse_note(note.content)
         category = note.category  # Category from path
 
-        # Collect tokens for incremental vocabulary update
+        # One token set per point, matching index_all's registration
         chunks = chunk_note(parsed, self.embedder)
         summary = generate_note_summary(parsed)
 
-        tokens_for_doc: list[set[str]] = [set(self.global_vocab.tokenize(summary))]
+        added: list[set[str]] = [set(self.global_vocab.tokenize(summary))]
         for chunk in chunks:
-            tokens_for_doc.append(set(self.global_vocab.tokenize(chunk.content)))
+            added.append(set(self.global_vocab.tokenize(chunk.content)))
 
-        # Update vocabulary incrementally (O(1) per note, not O(n))
-        # This handles both empty vocabulary and adding to existing vocabulary
-        self.global_vocab.update_codebase_incremental(
-            NOTES_CODEBASE_ID,
-            added_tokens=tokens_for_doc,
-            removed_tokens=[],
-            net_doc_change=len(tokens_for_doc),
-        )
+        # Register the delta before _index_note vectorizes (invariant 1)
+        removed = await self._indexed_token_sets(note_id)
+        applied = self._update_vocabulary(added, removed, len(added) - len(removed))
 
-        # Index with category from path - returns new chunk count
-        # Note: _index_note uses upsert, so existing chunks with same IDs are replaced
-        new_chunk_count = await self._index_note(parsed, category)
+        try:
+            # Index with category from path - returns new chunk count
+            # Note: _index_note uses upsert, so existing chunks with same IDs are replaced
+            new_chunk_count = await self._index_note(parsed, category)
 
-        # Delete orphaned chunks (old chunks beyond new chunk count)
-        # This is safe because new chunks are already upserted
-        await self._delete_orphan_chunks(note_id, new_chunk_count)
-        await self._complete_note_index(parsed, category)
+            # Delete orphaned chunks (old chunks beyond new chunk count)
+            # This is safe because new chunks are already upserted
+            await self._delete_orphan_chunks(note_id, new_chunk_count)
+            await self._complete_note_index(parsed, category)
+        except BaseException:
+            # Cancellation counts: like any failure it can land between the
+            # group writes and leave a partially replaced note.
+            if applied:
+                await self._revert_vocabulary_update(note_id, added, removed)
+            raise
 
     async def delete_note_index(self, note_id: UUID) -> None:
         """
         Remove a note from the index.
 
+        The note's vocabulary documents are retired only once its points are
+        gone. Subtracting after a failed delete would leave the note searchable
+        while its terms had been written off.
+
         Args:
             note_id: Note UUID to remove
         """
         async with self.collection_operation():
-            await self._delete_note_points(note_id)
+            await self._delete_one_note(note_id)
+
+    async def _delete_one_note(self, note_id: UUID) -> None:
+        await self._ensure_global_vocab()
+        try:
+            stored = await self._indexed_token_sets(note_id)
+        except Exception as e:
+            # Deletion must proceed even if the stored text cannot be read; the
+            # cost is a stale contribution that the next index_all repairs.
+            logger.warning(
+                f"Could not read note {note_id} back before deleting it from the "
+                f"index; its vocabulary contribution is left in place: {e}"
+            )
+            stored = []
+        await self._delete_note_points(note_id)
+        if stored:
+            self._update_vocabulary([], stored, -len(stored))
 
     async def _index_note(self, parsed: ParsedNote, category: str | None) -> int:
         """Index a single parsed note with category from path.
