@@ -6,6 +6,7 @@
 
 - Notes whose markdown file was deleted outside the server (git checkout or pull, a restore, a manual delete) are removed from the index by the next `index_all`, incremental or forced (#64). Before, their points stayed searchable indefinitely and the index still reported healthy, and since forced reindexing only cleared notes it could still locate on disk, even `reindex_notes(force=True)` could leave them behind. A note counts as deleted only when no file under the notes directory belongs to it, so a note that fails to parse keeps its points. Nothing is removed when the notes directory is missing or cannot be fully read, and an incremental pass also removes nothing when the directory holds no notes at all; both report the index unhealthy, and a forced reindex is needed to clear an emptied directory.
 - A forced reindex no longer clears the points of a note whose file exists but fails to parse.
+- Notes that keep their points without a parsed source, such as a note whose file fails to parse or a deleted note that could not be removed yet, stay counted in the notes vocabulary statistics, so deleting or repairing such a note later keeps those statistics exact.
 
 ### Added
 

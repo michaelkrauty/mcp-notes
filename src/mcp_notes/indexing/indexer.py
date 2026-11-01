@@ -203,9 +203,10 @@ class NoteIndexer:
         Pass 2: Generate embeddings and sparse vectors, upsert to Qdrant
 
         Between the passes, notes whose markdown file is gone are removed from
-        the index; pass 1 has already left them out of the registration. Notes
-        pass 2 does not finish keep their registration corrected to what is
-        actually stored for them.
+        the index; pass 1 has already left them out of the registration, and
+        this store's notes that keep their points without a parsed source are
+        registered as stored. Notes pass 2 does not finish keep their
+        registration corrected to what is actually stored for them.
 
         Args:
             force: If True, reindex everything. If False, incremental update.
@@ -220,7 +221,6 @@ class NoteIndexer:
         stored = await self._stored_note_ids()
         # Get existing indexed notes
         indexed = {} if force else await self._get_indexed_hashes()
-        pending = {note_id for note_id, note_hash in indexed.items() if not note_hash}
 
         # Single pass: collect notes to index AND tokens for GlobalVocabulary
         # (Previously iterated twice - once for notes, once for tokens)
@@ -256,9 +256,11 @@ class NoteIndexer:
                 await self._delete_note_points(UUID(note_id))
         else:
             await self._mark_notes_root(stored & seen)
-        vanished_removed = await self._remove_vanished_notes(
+        removed, vanished_removed = await self._remove_vanished_notes(
             stored - seen, found_notes=bool(seen), force=force
         )
+        # Half-written notes; a removed note's pending summary went with it
+        pending = {note_id for note_id, note_hash in indexed.items() if not note_hash} - removed
 
         if not notes_to_index:
             logger.info("No notes to index")
@@ -331,7 +333,8 @@ class NoteIndexer:
     # Single-note writes keep the notes contribution to GlobalVocabulary
     # current with incremental deltas instead of re-registering the whole
     # corpus on every write; index_all re-registers it from the source notes,
-    # removes the notes whose file is gone, which that leaves out, and then
+    # removes the notes whose file is gone, which that leaves out, adds back
+    # what is stored for the ones it keeps without a parsed source, and then
     # corrects it for any note it failed to write, and a process that
     # publishes a migrated generation registers what that generation stores.
     # Two invariants keep sparse retrieval honest:
@@ -778,7 +781,7 @@ class NoteIndexer:
 
     async def _remove_vanished_notes(
         self, unseen: set[str], *, found_notes: bool, force: bool
-    ) -> bool:
+    ) -> tuple[set[str], bool]:
         """Remove this store's notes whose markdown file is gone from the index.
 
         ``unseen`` holds the stored notes the source scan did not return. A
@@ -786,15 +789,20 @@ class NoteIndexer:
         a note that fails to parse keeps its points. Nothing is removed when
         the directory cannot be fully read, or, unless forced, when it holds
         no notes at all: an unmounted or misconfigured directory must not
-        empty the index. Pass 1 left these notes out of the vocabulary
-        registration, so a removed note needs no delta.
+        empty the index.
+
+        Pass 1 left every unseen note out of the vocabulary registration. A
+        removed note needs no delta; this store's notes that keep their points
+        are registered as stored, so a later delete or rewrite retires exactly
+        what is there.
 
         Returns:
-            Whether every vanished note this store owns was removed; False
-            also when the directory could not be checked
+            The notes removed, and whether every vanished note this store
+            owns was removed (False also when the directory could not be
+            checked)
         """
         if not unseen:
-            return True
+            return set(), True
         try:
             on_disk = {str(note_id) for note_id in self.note_store.note_ids_on_disk()}
         except OSError as e:
@@ -802,38 +810,82 @@ class NoteIndexer:
                 f"Could not scan {self.note_store.notes_dir} for deleted notes; "
                 f"keeping every indexed note: {e}"
             )
-            return False
-        vanished = await self._owned_note_ids(unseen - on_disk)
-        if not vanished:
-            return True
-        if not found_notes and not force:
+            try:
+                owned, _ = await self._owned_note_ids(unseen)
+            except Exception as read_error:
+                logger.warning(
+                    f"Could not read which of {len(unseen)} unseen note(s) are this "
+                    f"directory's; their vocabulary documents stay unregistered: {read_error}"
+                )
+            else:
+                await self._register_retained_notes(owned)
+            return set(), False
+        # An unparseable file is under this directory, so its note is ours.
+        unparsed = unseen & on_disk
+        vanished, unmarked = await self._owned_note_ids(unseen - on_disk)
+        if unmarked:
+            logger.warning(
+                f"Keeping {unmarked} deleted note(s) indexed before points named their notes "
+                f"directory: the shared collection {self.logical_collection_name} may hold "
+                "them for another directory"
+            )
+        removed: set[str] = set()
+        if vanished and not found_notes and not force:
             logger.warning(
                 f"No notes found in {self.note_store.notes_dir}; keeping the "
                 f"{len(vanished)} indexed note(s) whose file is missing. "
                 "A forced reindex removes them."
             )
-            return False
-        removed = 0
+            await self._register_retained_notes(unparsed | vanished)
+            return removed, False
         for note_id in vanished:
             try:
                 await self._delete_note_points(UUID(note_id))
-                removed += 1
+                removed.add(note_id)
             except Exception as e:
                 logger.error(f"Failed to remove deleted note {note_id} from the index: {e}")
-        logger.info(f"Removed {removed}/{len(vanished)} deleted notes from the index")
-        return removed == len(vanished)
+        if vanished:
+            logger.info(f"Removed {len(removed)}/{len(vanished)} deleted notes from the index")
+        await self._register_retained_notes(unparsed | (vanished - removed))
+        return removed, removed == vanished
 
-    async def _owned_note_ids(self, note_ids: set[str]) -> set[str]:
+    async def _register_retained_notes(self, note_ids: set[str]) -> None:
+        """Add the stored documents of this store's unseen notes to the contribution.
+
+        A failed read or write is logged, leaving the contribution to the
+        source notes as pass 1 registered it.
+        """
+        if not note_ids:
+            return
+        try:
+            stored = await self._stored_token_sets(
+                FieldCondition(key="note_id", match=MatchAny(any=sorted(note_ids)))
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not read {len(note_ids)} retained note(s) back; "
+                f"their vocabulary documents stay unregistered: {e}"
+            )
+            return
+        added = [tokens for _, tokens in stored]
+        if added:
+            self._update_vocabulary(added, [], len(added))
+
+    async def _owned_note_ids(self, note_ids: set[str]) -> tuple[set[str], int]:
         """The notes among ``note_ids`` whose stored points this notes directory wrote.
 
         Each point names the directory that wrote it in ``notes_root``.
         Unmarked points predate the marker: in a collection dedicated to this
         directory they are its own, but a shared collection
         (``VECTOR_COLLECTION_NAME``) may hold them for another directory, so
-        they are kept and counted in a warning.
+        they are not.
+
+        Returns:
+            The owned notes, and how many unmarked notes a shared collection
+            could not attribute
         """
         if not note_ids:
-            return set()
+            return set(), 0
         payloads = await self.storage.scroll_points(
             self.collection_name,
             filter_conditions=[
@@ -856,13 +908,7 @@ class NoteIndexer:
                 owned.add(note_id)
             elif not marked:
                 unmarked += 1
-        if unmarked:
-            logger.warning(
-                f"Keeping {unmarked} deleted note(s) indexed before points named their notes "
-                f"directory: the shared collection {self.logical_collection_name} may hold "
-                "them for another directory"
-            )
-        return owned
+        return owned, unmarked
 
     async def _mark_notes_root(self, note_ids: set[str]) -> None:
         """Stamp the notes directory marker on source notes indexed before it existed.

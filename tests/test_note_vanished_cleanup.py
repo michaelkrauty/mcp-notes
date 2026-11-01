@@ -22,6 +22,7 @@ from vector_core.settings import settings as vector_settings
 from vector_core.storage.embedding_fragments import is_derived_fragment
 from vector_core.storage.embedding_sources import stored_embedding_text
 
+from mcp_notes.indexing import indexer as indexer_module
 from mcp_notes.indexing.chunker import chunk_note, generate_note_summary
 from mcp_notes.indexing.indexer import NOTES_CODEBASE_ID, NoteIndexer
 from mcp_notes.indexing.migration import ensure_notes_collection
@@ -132,6 +133,15 @@ async def similar(indexer, note_id):
         indexer.note_store, indexer.storage, indexer.embedder, indexer.global_vocab
     )
     return {result.note.id for result in await engine.find_similar(note_id)}
+
+
+def summary_of(note_id):
+    return Filter(
+        must=[
+            FieldCondition(key="type", match=MatchValue(value="note")),
+            FieldCondition(key="note_id", match=MatchValue(value=str(note_id))),
+        ]
+    )
 
 
 def delete_externally(store, *notes):
@@ -245,6 +255,9 @@ async def test_empty_notes_directory_removes_nothing_unless_forced(notes, caplog
     assert status.index_healthy is False
     assert await all_points(indexer) == before
     assert "No notes found" in caplog.text
+    # Kept, so still registered as stored.
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+    assert vocab.get_codebase_doc_count(NOTES_CODEBASE_ID) > 0
 
     # A forced reindex is explicit intent.
     status = await indexer.index_all(force=True)
@@ -256,7 +269,7 @@ async def test_empty_notes_directory_removes_nothing_unless_forced(notes, caplog
 
 @pytest.mark.parametrize("force", [False, True])
 async def test_missing_notes_directory_removes_nothing(notes, caplog, force):
-    indexer, _ = notes
+    indexer, vocab = notes
     store = indexer.note_store
     store.create("First", paragraphs("first", 2))
     store.create("Second", paragraphs("second", 2))
@@ -269,12 +282,13 @@ async def test_missing_notes_directory_removes_nothing(notes, caplog, force):
     assert status.index_healthy is False
     assert await all_points(indexer) == before
     assert "Could not scan" in caplog.text
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can list an unreadable directory")
 @pytest.mark.parametrize("force", [False, True])
 async def test_unreadable_subdirectory_removes_nothing(notes, caplog, force):
-    indexer, _ = notes
+    indexer, vocab = notes
     store = indexer.note_store
     store.create("Keeper", paragraphs("kept", 2))
     hidden = store.create("Hidden", paragraphs("hidden", 2), category="private")
@@ -293,6 +307,7 @@ async def test_unreadable_subdirectory_removes_nothing(notes, caplog, force):
     assert status.index_healthy is False
     assert await all_points(indexer, hidden.id) == before
     assert "Could not scan" in caplog.text
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
 
 
 @pytest.mark.parametrize("pass_two_work", [False, True])
@@ -320,6 +335,8 @@ async def test_failed_removal_is_unhealthy_and_retried(notes, monkeypatch, caplo
     assert "injected delete failure" in caplog.text
     assert await all_points(indexer, gone.id) == []
     assert await all_points(indexer, stuck.id)
+    # Still stored, so still registered.
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
     if newcomer is not None:
         # Indexing the other notes went ahead.
         assert (status.total_notes, status.indexed_notes) == (2, 2)
@@ -379,6 +396,184 @@ async def test_shared_collection_removes_only_this_directorys_deleted_notes(
     assert await all_points(indexer, foreign.id) == foreign_before
     assert await all_points(indexer, legacy.id) == legacy_before
     assert caplog.text.count("Keeping 1 deleted note(s) indexed before") == 1
+
+
+@pytest.mark.parametrize("pass_two_work", [False, True])
+async def test_removed_pending_note_leaves_the_index_healthy(notes, pass_two_work):
+    indexer, _ = notes
+    store = indexer.note_store
+    keep = store.create("Keeper", paragraphs("kept", 2))
+    gone = store.create("Departing", paragraphs("gone", 2))
+    await indexer.index_all()
+    # A write that did not finish, or an index policy change, left it pending.
+    client = await indexer.storage.get_client()
+    await client.set_payload(
+        (await ensure_notes_collection(indexer)).physical_name,
+        payload={"note_hash": "", "source_reindex_pending": True},
+        points=summary_of(gone.id),
+        wait=True,
+    )
+    if pass_two_work:
+        store.update(keep.id, content=paragraphs("changed", 2))
+
+    delete_externally(store, gone)
+    status = await indexer.index_all()
+
+    assert await all_points(indexer, gone.id) == []
+    assert status.index_healthy
+    assert (await indexer.get_status()).index_healthy
+
+
+@pytest.mark.parametrize("then", ["delete", "repair"])
+@pytest.mark.parametrize("force", [False, True])
+async def test_unparseable_note_stays_registered_as_stored(notes, force, then):
+    indexer, vocab = notes
+    store = indexer.note_store
+    store.create("Keeper", paragraphs("kept", 2))
+    broken = store.create("Broken", paragraphs("broken", 3))
+    await indexer.index_all()
+    path = store.get_note_path(broken.id)
+    source = path.read_text()
+    path.write_text("<<<<<<< ours\n" + source)
+
+    await indexer.index_all(force=force)
+
+    retained = [
+        set(vocab.tokenize(stored_embedding_text(payload)))
+        for payload in await canonical(indexer, broken.id)
+    ]
+    assert retained
+    # The parsed source notes, plus what is stored for the one that does not parse.
+    assert contribution(vocab) == registration(source_token_sets(indexer) + retained)
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+
+    # Retiring or rewriting it later swaps out exactly what was registered.
+    if then == "delete":
+        await indexer.delete_note_index(broken.id)
+    else:
+        path.write_text(source.replace("brokenalpha", "fixedalpha"))
+        await indexer.index_note(broken.id)
+        assert vocab._get_doc_freq()["fixedalpha"] > 0
+    assert vocab._get_doc_freq().get("brokenalpha", 0) == 0
+    assert contribution(vocab) == registration(source_token_sets(indexer))
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+
+
+@pytest.mark.parametrize("failure", ["read", "write", "ownership"])
+async def test_retained_registration_failure_is_logged_not_raised(
+    notes, monkeypatch, caplog, failure
+):
+    indexer, vocab = notes
+    store = indexer.note_store
+    store.create("Keeper", paragraphs("kept", 2))
+    broken = store.create("Broken", paragraphs("broken", 3))
+    await indexer.index_all()
+    path = store.get_note_path(broken.id)
+    path.write_text("<<<<<<< ours\n" + path.read_text())
+    injected = AsyncMock(side_effect=RuntimeError("injected read failure"))
+    if failure == "read":
+        monkeypatch.setattr(indexer, "_stored_token_sets", injected)
+    elif failure == "write":
+
+        def locked(*args, **kwargs):
+            raise RuntimeError("injected vocabulary failure")
+
+        monkeypatch.setattr(vocab, "update_codebase_incremental", locked)
+    else:
+        # Without a full scan, ownership is read from the points themselves.
+        store.notes_dir.rename(store.base_dir / "unmounted")
+        monkeypatch.setattr(indexer, "_owned_note_ids", injected)
+
+    status = await indexer.index_all()
+
+    assert status.index_healthy is (failure != "ownership")
+    assert "injected" in caplog.text
+    assert await canonical(indexer, broken.id)
+    # Nothing worse than registering the parsed source notes alone.
+    assert contribution(vocab) == registration(source_token_sets(indexer))
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_retained_and_unfinished_notes_are_each_registered_once(notes, monkeypatch, force):
+    indexer, vocab = notes
+    store = indexer.note_store
+    store.create("Keeper", paragraphs("kept", 2))
+    broken = store.create("Broken", paragraphs("broken", 3))
+    failing = store.create("Failing", paragraphs("old", 3))
+    await indexer.index_all()
+    path = store.get_note_path(broken.id)
+    path.write_text("<<<<<<< ours\n" + path.read_text())
+    store.update(failing.id, content=paragraphs("new", 3))
+
+    original = indexer_module.upsert_fragment_group
+
+    async def fail_second_chunk(storage, collection, points):
+        payload = points[0].payload
+        if payload.get("note_id") == str(failing.id) and payload.get("chunk_index") == 1:
+            raise RuntimeError("injected write failure")
+        await original(storage, collection, points)
+
+    monkeypatch.setattr(indexer_module, "upsert_fragment_group", fail_second_chunk)
+    retained = AsyncMock(wraps=indexer._register_retained_notes)
+    unfinished = AsyncMock(wraps=indexer._reconcile_unfinished_notes)
+    monkeypatch.setattr(indexer, "_register_retained_notes", retained)
+    monkeypatch.setattr(indexer, "_reconcile_unfinished_notes", unfinished)
+
+    assert (await indexer.index_all(force=force)).index_healthy is False
+
+    # A retained note has no parsed source, so pass 2 never writes it.
+    assert set().union(*(call.args[0] for call in retained.await_args_list)) == {str(broken.id)}
+    assert {
+        str(note_id) for call in unfinished.await_args_list for note_id, _, _ in call.args[0]
+    } == {str(failing.id)}
+    assert contribution(vocab) == registration(await stored_token_sets(indexer))
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_shared_collection_registers_only_this_directorys_retained_notes(
+    notes, tmp_path, monkeypatch, force
+):
+    monkeypatch.setattr(vector_settings, "collection_name", "shared-knowledge")
+    indexer, vocab = notes
+    store = indexer.note_store
+    keep = store.create("Keeper", paragraphs("kept", 2))
+    broken = store.create("Broken", paragraphs("broken", 3))
+    legacy = store.create("Legacy", paragraphs("legacy", 2))
+    await indexer.index_all()
+    collection = (await ensure_notes_collection(indexer)).physical_name
+    other_vocab = GlobalVocabulary(db_path=tmp_path / "other-vocabulary.db")
+    other_store = NoteStore(tmp_path / "other-source")
+    foreign = other_store.create("Foreign", paragraphs("foreign", 2))
+    other = NoteIndexer(other_store, indexer.storage, indexer.embedder, other_vocab)
+    try:
+        await other.index_note(foreign.id)
+    finally:
+        other_vocab.close()
+    client = await indexer.storage.get_client()
+    await client.delete_payload(
+        collection,
+        keys=[MARKER],
+        points=Filter(must=[FieldCondition(key="note_id", match=MatchValue(value=str(legacy.id)))]),
+        wait=True,
+    )
+    path = store.get_note_path(broken.id)
+    path.write_text("<<<<<<< ours\n" + path.read_text())
+    delete_externally(store, legacy)
+
+    await indexer.index_all(force=force)
+
+    # The unparseable note is this directory's; the other root's note and the
+    # unattributable legacy one are kept but not counted here.
+    assert await canonical(indexer, foreign.id)
+    assert await canonical(indexer, legacy.id)
+    own = [
+        set(vocab.tokenize(stored_embedding_text(payload)))
+        for payload in await canonical(indexer)
+        if payload["note_id"] in {str(keep.id), str(broken.id)}
+    ]
+    assert contribution(vocab) == registration(own)
+    assert vocab._get_doc_freq()["brokenalpha"] > 0
+    assert vocab._get_doc_freq().get("legacyalpha", 0) == 0
 
 
 async def test_written_points_name_their_notes_directory(notes, tmp_path):
