@@ -375,3 +375,33 @@ async def test_explicit_note_index_deletion_still_removes_complete_group(notes_i
     indexer.note_store.delete(note.id)
     await indexer.delete_note_index(note.id)
     assert await payloads(indexer, generation.physical_name) == []
+
+
+@pytest.mark.parametrize("query", ["SUMMARY_MARKER", ""])
+async def test_note_summary_results_carry_an_excerpt(tmp_path, monkeypatch, query):
+    # A note's summary point retains its text as the embedding input rather
+    # than under `content`, so the excerpt has to come from there too, for
+    # hybrid hits and filter-only listings alike.
+    monkeypatch.setattr(vector_settings, "collection_name", None)
+    monkeypatch.setattr(vector_settings, "cache_dir", tmp_path / "cache")
+    store = NoteStore(tmp_path / "source")
+    note = store.create("Summary title", "Body text with SUMMARY_MARKER.", tags=["excerpt"])
+    storage = QdrantStorage(url="http://isolated.invalid", embedding_dim=128)
+    storage._client = AsyncQdrantClient(location=":memory:")
+    vocab = GlobalVocabulary(db_path=tmp_path / "vocabulary.db")
+    embedder = isolated_embedder(100000)
+    try:
+        indexer = NoteIndexer(store, storage, embedder, vocab)
+        await indexer.index_all()
+        engine = NoteSearchEngine(store, storage, embedder, vocab)
+
+        results = await engine.search(query, tags=["excerpt"])
+
+        summaries = [result for result in results if result.result_type == "note"]
+        assert [result.note.id for result in summaries] == [note.id]
+        assert summaries[0].note.excerpt.startswith("Summary title")
+        assert "SUMMARY_MARKER" in summaries[0].note.excerpt
+    finally:
+        await storage.close()
+        await embedder.close()
+        vocab.close()

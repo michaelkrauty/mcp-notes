@@ -46,7 +46,9 @@ def convert_note_payload(
 
     created, modified = parse_payload_timestamps(payload)
     point_type = payload.get("type", "note")
-    content = payload.get("content", "")
+    # Chunk points store their text in `content`. A note's summary point keeps
+    # its text only as the retained embedding input, so fall back to that.
+    content = payload.get("content") or payload.get("embedding_text") or ""
 
     summary = NoteSummary(
         id=note_id,
