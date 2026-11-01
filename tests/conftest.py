@@ -3,7 +3,7 @@
 import atexit
 import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 
 # Override ambient data paths before settings imports. Service endpoints may
 # be explicitly opted into, but tests and their subprocesses always own their
@@ -19,6 +19,10 @@ for variable, directory in (
     os.environ[variable] = str(TEST_DATA_DIR / directory)
 os.environ.setdefault("VECTOR_EMBEDDING_URL", "http://127.0.0.1:1")
 os.environ.setdefault("VECTOR_QDRANT_URL", "http://127.0.0.1:1")
+# Every test collection is named after its own temporary directory. A shared
+# collection name from the environment would make tests write into, and their
+# teardown delete, a collection that is not theirs.
+os.environ.pop("VECTOR_COLLECTION_NAME", None)
 
 # Settings read the environment once, at import, and an unset embedding
 # dimension leaves collection creation raising "embedding_dim not yet
@@ -118,6 +122,109 @@ requires_full_stack = pytest.mark.skipif(
 )
 
 
+# Logical collection names tests have claimed. Only these can be deleted by
+# delete_test_collection; the pending set holds those not yet cleaned up, for
+# the end-of-session sweep.
+_OWNED_TEST_COLLECTIONS: set[str] = set()
+_PENDING_TEST_COLLECTIONS: set[str] = set()
+
+
+def _claim(logical_name: str) -> str:
+    from vector_core.settings import settings as vector_settings  # noqa: PLC0415
+
+    if vector_settings.collection_name and logical_name == vector_settings.collection_name:
+        raise RuntimeError(
+            f"Refusing to treat the configured collection {logical_name!r} as a test collection"
+        )
+    _OWNED_TEST_COLLECTIONS.add(logical_name)
+    _PENDING_TEST_COLLECTIONS.add(logical_name)
+    return logical_name
+
+
+def claim_notes_test_collection(notes_dir: Path) -> str:
+    """Claim the collection named after a temporary notes directory.
+
+    Refuses a directory outside the system temporary directory, and a name
+    that is really a configured shared collection, so a test can never adopt
+    a collection it did not create.
+    """
+    from vector_core.storage.qdrant import generate_collection_name  # noqa: PLC0415
+
+    from mcp_notes.settings import settings  # noqa: PLC0415
+
+    if not Path(notes_dir).resolve().is_relative_to(Path(gettempdir()).resolve()):
+        raise RuntimeError(f"Refusing a test collection for non-temporary {notes_dir}")
+    return _claim(generate_collection_name(str(notes_dir), prefix=settings.collection_prefix))
+
+
+def claim_test_collection(logical_name: str) -> str:
+    """Claim a test-only logical collection name (it must start with ``test_``)."""
+    if not logical_name.startswith("test_"):
+        raise RuntimeError(f"Refusing to claim non-test collection name {logical_name!r}")
+    return _claim(logical_name)
+
+
+async def delete_test_collection(logical_name: str) -> None:
+    """Delete everything stored for a claimed test logical collection name.
+
+    A logical name is an alias (``<name>__active``) for the physical
+    ``vcgen_*`` collection of its current embedding generation, so deleting a
+    collection called ``logical_name`` alone removes nothing. This removes the
+    alias, every generation whose manifest names ``logical_name``, and a legacy
+    collection that still uses the name directly. Only names a test claimed
+    are touched, and a name stays pending for the session sweep until its
+    cleanup succeeds. Best-effort: Qdrant may be unavailable.
+    """
+    if logical_name not in _OWNED_TEST_COLLECTIONS:
+        raise RuntimeError(f"Refusing to delete unclaimed collection {logical_name!r}")
+
+    from qdrant_client.models import DeleteAlias, DeleteAliasOperation  # noqa: PLC0415
+    from vector_core.storage.qdrant import QdrantStorage  # noqa: PLC0415
+
+    storage = QdrantStorage()
+    try:
+        client = await storage.get_client()
+        alias = f"{logical_name}__active"
+        if any(found.alias_name == alias for found in (await client.get_aliases()).aliases):
+            await client.update_collection_aliases(
+                change_aliases_operations=[
+                    DeleteAliasOperation(delete_alias=DeleteAlias(alias_name=alias))
+                ]
+            )
+        for collection in (await client.get_collections()).collections:
+            name = collection.name
+            if name != logical_name:
+                if not name.startswith("vcgen_"):
+                    continue
+                metadata = await storage.get_metadata(name) or {}
+                if metadata.get("embedding_generation", {}).get("logical_name") != logical_name:
+                    continue
+            await client.delete_collection(name)
+    except Exception:
+        return  # Cleanup failure shouldn't fail the test; the sweep retries it
+    finally:
+        try:
+            await storage.close()
+        except Exception:
+            pass
+    _PENDING_TEST_COLLECTIONS.discard(logical_name)
+
+
+def delete_test_collection_sync(logical_name: str) -> None:
+    """Run ``delete_test_collection`` from synchronous fixture teardown.
+
+    Runs on its own thread and event loop so it neither depends on nor
+    disturbs a loop the test may have left behind.
+    """
+    import threading  # noqa: PLC0415
+
+    thread = threading.Thread(
+        target=lambda: asyncio.run(delete_test_collection(logical_name)), daemon=True
+    )
+    thread.start()
+    thread.join(timeout=30.0)
+
+
 @pytest.fixture
 def mock_collection_mutation(monkeypatch):
     """Stub the writer boundary explicitly for mocked tool tests only."""
@@ -199,47 +306,12 @@ def tmp_notes_dir(tmp_path, monkeypatch):
     singletons_module._note_service.reset()  # CRITICAL: Must reset to use new store
 
     # Track collection name for cleanup
-    from vector_core.storage.qdrant import generate_collection_name
-
-    collection_name = generate_collection_name(
-        str(notes_dir),
-        prefix=settings.collection_prefix,
-    )
+    collection_name = claim_notes_test_collection(notes_dir)
 
     yield notes_dir
 
-    # Cleanup: Delete the test collection from Qdrant
-    # Note: This cleanup is best-effort - failures are logged but don't fail tests
-    async def cleanup_collection():
-        from vector_core.storage.qdrant import QdrantStorage
-
-        storage = QdrantStorage()
-        try:
-            if await storage.collection_exists(collection_name):
-                await storage.delete_collection(collection_name)
-        except Exception:
-            # Cleanup failure shouldn't fail the test - Qdrant may be unavailable
-            pass
-        finally:
-            try:
-                await storage.close()
-            except Exception:
-                pass
-
-    # Use a separate thread to run cleanup to avoid event loop conflicts
-    import threading
-
-    def run_cleanup_sync():
-        """Run cleanup in a new event loop on a separate thread."""
-
-        def _run():
-            asyncio.run(cleanup_collection())
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-        thread.join(timeout=5.0)  # Wait up to 5 seconds for cleanup
-
-    run_cleanup_sync()
+    # Cleanup: delete the test collection, its alias and generations from Qdrant
+    delete_test_collection_sync(collection_name)
 
     # Restore sync singleton state using set_instance
     singletons_module._note_store.set_instance(original_store)
@@ -301,6 +373,9 @@ def pytest_sessionfinish(session, exitstatus):
     from vector_core.storage.qdrant import QdrantStorage
 
     async def cleanup():
+        # Collections whose teardown did not run or did not succeed
+        for logical_name in sorted(_PENDING_TEST_COLLECTIONS):
+            await delete_test_collection(logical_name)
         storage = QdrantStorage()
         try:
             collections = await storage.list_collections(prefix="notes_")

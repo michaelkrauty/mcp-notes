@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.5] - 2026-11-01
+
+### Fixed
+
+- Full-stack test runs no longer leave their collections behind in the Qdrant they run against (#90). Test teardown deleted a collection named after the logical collection, but since embedding generations that name is only an alias for a physical `vcgen_*` collection, so nothing was removed; one full run left about 100 collections and aliases behind. Teardown now deletes the alias, every generation whose manifest names the test's logical collection, and any legacy collection of that name, and an end-of-session sweep repeats it for tests that died before their teardown. The facts integration tests use a unique collection name per run.
+- A facts integration test called a private vector-core helper renamed in vector-core 1.9.0; it now reads the stored facts through the current helper.
+
 ## [1.3.4] - 2026-10-31
 
 ### Fixed

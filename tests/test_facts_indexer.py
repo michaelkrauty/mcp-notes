@@ -7,7 +7,7 @@ import pytest
 
 from mcp_notes.facts import Fact, FactIndexer, FactStore, generate_fact_text
 
-from .conftest import requires_full_stack
+from .conftest import claim_test_collection, delete_test_collection, requires_full_stack
 
 
 class TestGenerateFactText:
@@ -140,7 +140,7 @@ class TestFactIndexerIntegration:
         embedder = EmbeddingClient()
         global_vocab = GlobalVocabulary()
 
-        collection_name = "test_facts_integration"
+        collection_name = claim_test_collection(f"test_facts_integration_{uuid4().hex[:12]}")
 
         indexer = FactIndexer(
             fact_store=temp_fact_store,
@@ -152,11 +152,8 @@ class TestFactIndexerIntegration:
 
         yield indexer
 
-        # Cleanup: delete the collection and close resources
-        try:
-            await storage.delete_collection(collection_name)
-        except Exception:
-            pass  # Ignore cleanup errors
+        # Cleanup: delete the collection, its alias and generations, and close resources
+        await delete_test_collection(collection_name)
         await storage.close()
 
     @pytest.mark.asyncio
@@ -280,7 +277,7 @@ class TestFactIndexerIntegration:
 
         # Verify by checking indexed IDs
         generation = await integration_indexer._ensure_generation()
-        indexed = await integration_indexer._get_indexed_fact_ids(generation.physical_name)
+        indexed = await integration_indexer._stored_fact_tokens(generation.physical_name)
         assert str(fact.id) not in indexed
 
     @pytest.mark.asyncio
