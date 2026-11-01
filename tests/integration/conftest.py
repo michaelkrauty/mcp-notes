@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from ..conftest import delete_test_collection_sync, track_test_collection
+from ..conftest import claim_notes_test_collection, delete_test_collection_sync
 
 
 @pytest.fixture
@@ -53,13 +53,7 @@ def integration_notes_dir(tmp_path, monkeypatch):
     settings.dir = notes_dir
 
     # Track collection name for cleanup
-    from vector_core import generate_collection_name
-    collection_name = track_test_collection(
-        generate_collection_name(
-            str(notes_dir),
-            prefix=settings.collection_prefix,
-        )
-    )
+    collection_name = claim_notes_test_collection(notes_dir)
 
     yield notes_dir
 

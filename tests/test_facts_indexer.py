@@ -7,7 +7,7 @@ import pytest
 
 from mcp_notes.facts import Fact, FactIndexer, FactStore, generate_fact_text
 
-from .conftest import delete_test_collection, requires_full_stack, track_test_collection
+from .conftest import claim_test_collection, delete_test_collection, requires_full_stack
 
 
 class TestGenerateFactText:
@@ -140,7 +140,7 @@ class TestFactIndexerIntegration:
         embedder = EmbeddingClient()
         global_vocab = GlobalVocabulary()
 
-        collection_name = track_test_collection(f"test_facts_integration_{uuid4().hex[:12]}")
+        collection_name = claim_test_collection(f"test_facts_integration_{uuid4().hex[:12]}")
 
         indexer = FactIndexer(
             fact_store=temp_fact_store,
