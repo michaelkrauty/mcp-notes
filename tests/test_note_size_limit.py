@@ -136,6 +136,30 @@ class TestBulkScans:
         assert store.note_ids_on_disk() == {note.id}
 
 
+def bury_id(path, note_id):
+    """Rewrite a note so its id comes after a title longer than the size limit."""
+    path.write_text(
+        "---\n"
+        f"title: {'T' * (LIMIT * 2)}\n"
+        f"id: {note_id}\n"
+        "created: '2026-01-01T00:00:00+00:00'\n"
+        "modified: '2026-01-01T00:00:00+00:00'\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+
+class TestDeletedNoteCheck:
+    def test_an_oversized_note_that_cannot_be_identified_fails_the_scan(self, store, small_limit):
+        # YAML does not require id first. If the id lies past the bounded
+        # prefix, the scan must not report the note as absent.
+        note = store.create("Buried", "body")
+        path = store.get_note_path(note.id).rename(store.notes_dir / "hand-named.md")
+        bury_id(path, note.id)
+        with pytest.raises(OSError, match="Cannot identify"):
+            store.note_ids_on_disk()
+
+
 class TestMigrationSourceScan:
     def test_snapshot_skips_an_oversized_note(self, store, small_limit, monkeypatch, caplog):
         kept = store.create("Kept", "fine")

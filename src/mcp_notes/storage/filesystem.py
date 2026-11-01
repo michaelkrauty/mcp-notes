@@ -60,10 +60,12 @@ def read_note_text(path: Path) -> str:
     return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _read_note_prefix(path: Path) -> bytes:
-    """Read at most max_note_size_kb of a file, for scans that only need its start."""
+def _read_note_prefix(path: Path) -> tuple[bytes, bool]:
+    """Read at most max_note_size_kb of a file, and whether more of it was left unread."""
+    limit = settings.max_note_size_kb * 1024
     with path.open("rb") as f:
-        return f.read(settings.max_note_size_kb * 1024)
+        data = f.read(limit + 1)
+    return data[:limit], len(data) > limit
 
 
 def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -741,14 +743,17 @@ class NoteStore:
         Unlike iter_all, nothing is skipped silently, so an unreadable note is
         never mistaken for a deleted one. A file counts for the UUID in its
         name. A file named otherwise counts for its parsed id, or, if it does
-        not parse, for every UUID its text mentions. Symlinked directories are
-        not descended, as in iter_all.
+        not parse, for every UUID its text mentions. Only the first
+        max_note_size_kb of a file is read; a larger file whose id cannot be
+        parsed from that much fails the scan rather than going uncounted.
+        Symlinked directories are not descended, as in iter_all.
 
         Returns:
             Set of note UUIDs with a markdown file on disk
 
         Raises:
-            OSError: If notes_dir is missing or any part of it cannot be read
+            OSError: If notes_dir is missing, any part of it cannot be read, or
+                an oversized note cannot be identified within the size limit
         """
 
         def on_error(error: OSError) -> None:
@@ -766,12 +771,18 @@ class NoteStore:
                 path = Path(directory) / name
                 if path.is_symlink():
                     continue
-                # The id is in the frontmatter at the top, so an oversized note
-                # is identified from its first max_note_size_kb.
-                content = _read_note_prefix(path)
+                content, truncated = _read_note_prefix(path)
+                # A cut-off prefix may end inside a multibyte character.
+                errors = "ignore" if truncated else "strict"
                 try:
-                    note_ids.add(parse_note(content.decode("utf-8")).id)
-                except Exception:
+                    note_ids.add(parse_note(content.decode("utf-8", errors=errors)).id)
+                except Exception as e:
+                    if truncated:
+                        # UUIDs in a cut-off prefix may not include the note's own
+                        # id, which could then pass for deleted.
+                        raise OSError(
+                            f"Cannot identify {path} from its first {settings.max_note_size_kb} KB"
+                        ) from e
                     note_ids.update(
                         UUID(match.decode()) for match in _UUID_PATTERN.findall(content)
                     )
