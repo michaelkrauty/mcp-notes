@@ -275,7 +275,16 @@ __pycache__/
         title: str,
     ) -> str | None:
         """
-        Commit a note move/rename with git mv for history tracking.
+        Commit a note move/rename so ``git log --follow`` tracks it.
+
+        The callers (``NoteService.update`` and ``move_category``) move the file
+        on disk through ``NoteStore.update`` before committing, so the usual
+        case is staged directly: the new path is added and the old one dropped
+        from the index. Git stores no rename record either way; ``--follow``
+        detects the rename by content similarity. ``git mv`` only runs when the
+        old file is still on disk (a caller that has not moved it yet) or the
+        new one is missing, since on an already-moved file it can only fail on
+        its missing source.
 
         Args:
             old_path: Old path to note file
@@ -283,7 +292,7 @@ __pycache__/
             title: Note title (for commit message)
 
         Returns:
-            Commit SHA or None if git disabled
+            Commit SHA or None if git disabled or the commit failed
         """
         repo = self.repo
         if repo is None:
@@ -297,26 +306,30 @@ __pycache__/
             return None
 
         with self._repo_lock:
+            if old_path.exists() or not new_path.exists():
+                try:
+                    repo.git.mv(str(old_rel), str(new_rel))
+                    commit = repo.index.commit(f"Move note: {title}")
+                    logger.info(f"Git commit (move): {commit.hexsha[:8]} - {title}")
+                    return commit.hexsha
+                except GitCommandError as e:
+                    logger.warning(f"Git mv failed, using add: {e}")
+            else:
+                logger.debug(f"Note already moved on disk, staging rename: {old_rel} -> {new_rel}")
+
             try:
-                # Use git mv for proper history tracking
-                repo.git.mv(str(old_rel), str(new_rel))
+                repo.index.add([str(new_rel)])
+                tracked_paths = {str(entry_path) for entry_path, _stage in repo.index.entries}
+                if str(old_rel) in tracked_paths:
+                    repo.index.remove([str(old_rel)])
+                else:
+                    logger.debug(f"Old path not in the git index: {old_rel}")
                 commit = repo.index.commit(f"Move note: {title}")
                 logger.info(f"Git commit (move): {commit.hexsha[:8]} - {title}")
                 return commit.hexsha
             except GitCommandError as e:
-                # Fallback: file was already moved, just add new location
-                logger.warning(f"Git mv failed, using add: {e}")
-                try:
-                    repo.index.add([str(new_rel)])
-                    try:
-                        repo.index.remove([str(old_rel)])
-                    except Exception as e:
-                        logger.debug(f"Old file already removed from index: {old_rel} ({e})")
-                    commit = repo.index.commit(f"Move note: {title}")
-                    return commit.hexsha
-                except GitCommandError as e2:
-                    logger.error(f"Git commit (move fallback) failed: {e2}")
-                    return None
+                logger.error(f"Git commit (move) failed: {e}")
+                return None
 
     @staticmethod
     def _find_note_path_in_tree(commit: Commit, note_id: UUID) -> str | None:

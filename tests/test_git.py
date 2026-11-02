@@ -1,7 +1,12 @@
 """Tests for Git versioning."""
 
+import logging
 from unittest.mock import patch
 from uuid import uuid4
+
+from git import IndexFile
+from git.cmd import Git
+from git.exc import GitCommandError
 
 from mcp_notes.models import NoteVersion
 from mcp_notes.settings import settings
@@ -853,3 +858,150 @@ class TestGitManagerDeletedNoteHistory:
         messages = [v.message for v in history]
         assert all("Decoy" not in m for m in messages)
         assert any("Create note: Target" in m for m in messages)
+
+
+class TestGitManagerCommitMove:
+    """commit_move stages an already-moved file directly (issue #103).
+
+    Every caller moves the note on disk before committing, so running ``git mv``
+    first could only fail on its missing source and log a warning on every
+    ordinary move, rename or category change.
+    """
+
+    BODY = "A line of note body that stays the same across the move.\n" * 10
+
+    def _make_manager(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "git_enabled", True)
+        monkeypatch.setattr(settings, "git_user_name", "Test User")
+        monkeypatch.setattr(settings, "git_user_email", "test@test.com")
+
+        manager = GitManager(notes_dir=tmp_path)
+        assert manager.repo is not None
+        return manager
+
+    def _paths(self, tmp_path, note_id):
+        old = tmp_path / "notes" / "old" / f"note-{note_id}.md"
+        new = tmp_path / "notes" / "new" / f"note-{note_id}.md"
+        old.parent.mkdir(parents=True)
+        new.parent.mkdir(parents=True)
+        return old, new
+
+    def _head_diff(self, manager):
+        """Name-status of HEAD against its parent, with rename detection."""
+        return manager.repo.git.diff_tree("-M", "--name-status", "-r", "HEAD~1", "HEAD")
+
+    def test_already_moved_stages_rename_without_git_mv(self, tmp_path, monkeypatch, caplog):
+        """The usual case: no git mv subprocess, no warning, a rename commit."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+        note_id = uuid4()
+        old, new = self._paths(tmp_path, note_id)
+        old.write_text("modified: 1\n" + self.BODY)
+        manager.commit_create(note_id, "Test Note", path=old)
+
+        # Move it the way NoteStore.update does: write the new file, unlink the old.
+        new.write_text("modified: 2\n" + self.BODY)
+        old.unlink()
+
+        caplog.set_level(logging.DEBUG, logger="mcp_notes.storage.git")
+        # Record every git subprocess GitPython runs (the call passes through).
+        call_process = Git._call_process
+        with patch.object(Git, "_call_process", autospec=True, side_effect=call_process) as spy:
+            sha = manager.commit_move(old, new, "Test Note")
+
+        git_commands = [c.args[1] for c in spy.call_args_list]
+        assert "mv" not in git_commands
+        assert sha == manager.repo.head.commit.hexsha
+        assert manager.repo.head.commit.message == "Move note: Test Note"
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == "mcp_notes.storage.git" and r.levelno >= logging.WARNING
+        ]
+        assert warnings == []
+        assert any("Git commit (move)" in r.getMessage() for r in caplog.records)
+
+        rel_old = f"notes/old/note-{note_id}.md"
+        rel_new = f"notes/new/note-{note_id}.md"
+        status, src, dst = self._head_diff(manager).split("\t")
+        assert status.startswith("R")
+        assert (src, dst) == (rel_old, rel_new)
+        assert not manager.repo.is_dirty(untracked_files=True)
+        # History follows the rename back to the creation commit.
+        messages = [v.message for v in manager.get_history(note_id, path=new)]
+        assert messages == ["Move note: Test Note", "Create note: Test Note"]
+
+    def test_already_moved_untracked_old_path_commits_new_path(self, tmp_path, monkeypatch, caplog):
+        """An old path git never tracked is not removed from the index (no
+        failing git rm), and the new path is still committed."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+        note_id = uuid4()
+        old, new = self._paths(tmp_path, note_id)
+        new.write_text(self.BODY)
+
+        with caplog.at_level(logging.WARNING, logger="mcp_notes.storage.git"):
+            sha = manager.commit_move(old, new, "Test Note")
+
+        assert sha == manager.repo.head.commit.hexsha
+        assert caplog.records == []
+        assert self._head_diff(manager) == f"A\tnotes/new/note-{note_id}.md"
+
+    def test_old_file_still_on_disk_is_moved_and_committed(self, tmp_path, monkeypatch, caplog):
+        """A caller that has not moved the file yet still gets it moved."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+        note_id = uuid4()
+        old, new = self._paths(tmp_path, note_id)
+        old.write_text(self.BODY)
+        manager.commit_create(note_id, "Test Note", path=old)
+
+        with caplog.at_level(logging.WARNING, logger="mcp_notes.storage.git"):
+            sha = manager.commit_move(old, new, "Test Note")
+
+        assert caplog.records == []
+        assert sha == manager.repo.head.commit.hexsha
+        assert not old.exists()
+        assert new.read_text() == self.BODY
+        status, src, dst = self._head_diff(manager).split("\t")
+        assert status == "R100"
+        assert (src, dst) == (f"notes/old/note-{note_id}.md", f"notes/new/note-{note_id}.md")
+        assert not manager.repo.is_dirty(untracked_files=True)
+
+    def test_new_path_outside_repo_logs_error(self, tmp_path, monkeypatch, caplog):
+        """A path outside the notes directory is a genuine failure."""
+        (tmp_path / "repo").mkdir()
+        manager = self._make_manager(tmp_path / "repo", monkeypatch)
+        note_id = uuid4()
+        old = tmp_path / "repo" / "notes" / f"note-{note_id}.md"
+        outside = tmp_path / "elsewhere" / f"note-{note_id}.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text(self.BODY)
+        head_before = manager.repo.head.commit.hexsha
+
+        with caplog.at_level(logging.WARNING, logger="mcp_notes.storage.git"):
+            result = manager.commit_move(old, outside, "Test Note")
+
+        assert result is None
+        assert [r.levelname for r in caplog.records] == ["ERROR"]
+        assert "not relative to base_dir" in caplog.records[0].getMessage()
+        assert manager.repo.head.commit.hexsha == head_before
+
+    def test_git_error_on_move_commit_logs_error(self, tmp_path, monkeypatch, caplog):
+        """A git failure while committing an already-moved note is reported."""
+        manager = self._make_manager(tmp_path, monkeypatch)
+        note_id = uuid4()
+        old, new = self._paths(tmp_path, note_id)
+        old.write_text(self.BODY)
+        manager.commit_create(note_id, "Test Note", path=old)
+        new.write_text(self.BODY)
+        old.unlink()
+
+        failure = GitCommandError("git commit", 1, "error")
+        with (
+            caplog.at_level(logging.WARNING, logger="mcp_notes.storage.git"),
+            patch.object(IndexFile, "commit", side_effect=failure),
+        ):
+            result = manager.commit_move(old, new, "Test Note")
+
+        assert result is None
+        assert [r.levelname for r in caplog.records] == ["ERROR"]
+        assert "Git commit (move) failed" in caplog.records[0].getMessage()
+        assert manager.repo.head.commit.message == "Create note: Test Note"
