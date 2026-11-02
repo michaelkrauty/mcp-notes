@@ -1,12 +1,25 @@
 """Tests for UUID-to-path index."""
 
 import json
+import logging
+import multiprocessing
+import os
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
+from mcp_notes.storage.filesystem import NoteStore
 from mcp_notes.storage.uuid_index import INDEX_FILENAME, UUIDIndex
+
+# Spawned rather than forked: the test process may already run threads, and a
+# fork copies whatever locks they hold.
+_SPAWN = multiprocessing.get_context("spawn")
+
+
+def _on_disk(base_dir: Path) -> dict[str, str]:
+    """The map currently stored in the index file."""
+    return json.loads((base_dir / ".index" / INDEX_FILENAME).read_text())["uuid_paths"]
 
 
 class TestUUIDIndexInit:
@@ -24,7 +37,7 @@ class TestUUIDIndexInit:
         """New index is empty."""
         index = UUIDIndex(tmp_path)
         assert index.count() == 0
-        assert index._dirty is False
+        assert index._pending == []
 
 
 class TestUUIDIndexLoad:
@@ -59,6 +72,16 @@ class TestUUIDIndexLoad:
         index_dir.mkdir(parents=True)
         with open(index_dir / INDEX_FILENAME, "w") as f:
             f.write("not valid json")
+
+        index = UUIDIndex(tmp_path)
+        index.load()
+        assert index.count() == 0
+
+    def test_load_unexpected_structure(self, tmp_path):
+        """Loading valid JSON of the wrong shape results in empty index."""
+        index_dir = tmp_path / ".index"
+        index_dir.mkdir(parents=True)
+        (index_dir / INDEX_FILENAME).write_text('[{"uuid_paths": {}}]')
 
         index = UUIDIndex(tmp_path)
         index.load()
@@ -118,8 +141,8 @@ class TestUUIDIndexSave:
         index.save()  # Should not create any files
         assert not (tmp_path / ".index").exists()
 
-    def test_save_clears_dirty(self, tmp_path):
-        """Save clears dirty flag."""
+    def test_add_persists_without_save(self, tmp_path):
+        """Add writes the index itself; save has nothing left to do."""
         index = UUIDIndex(tmp_path)
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir(parents=True)
@@ -129,9 +152,10 @@ class TestUUIDIndexSave:
         note_path.touch()
         index.add(note_id, note_path)
 
-        assert index._dirty is True
+        assert index._pending == []
+        assert _on_disk(tmp_path) == {str(note_id): "test.md"}
         index.save()
-        assert index._dirty is False
+        assert _on_disk(tmp_path) == {str(note_id): "test.md"}
 
 
 class TestUUIDIndexRebuild:
@@ -385,7 +409,7 @@ class TestUUIDIndexAdd:
         index.add(note_id, note_path)
 
         assert index.exists(note_id)
-        assert index._dirty is True
+        assert _on_disk(tmp_path) == {str(note_id): note_path.name}
 
     def test_add_updates_existing(self, tmp_path):
         """Add updates existing entry."""
@@ -436,11 +460,10 @@ class TestUUIDIndexRemove:
         note_path.touch()
         index.add(note_id, note_path)
 
-        index._dirty = False  # Reset for test
         index.remove(note_id)
 
         assert not index.exists(note_id)
-        assert index._dirty is True
+        assert _on_disk(tmp_path) == {}
 
     def test_remove_nonexistent(self, tmp_path):
         """Remove nonexistent entry is safe."""
@@ -449,7 +472,8 @@ class TestUUIDIndexRemove:
 
         # Should not raise
         index.remove(note_id)
-        assert index._dirty is False
+        assert not index.exists(note_id)
+        assert index._pending == []
 
 
 class TestUUIDIndexExists:
@@ -840,3 +864,338 @@ class TestUUIDIndexSymlinkSecurity:
         assert count == 1
         assert index.exists(real_id)
         assert not index.exists(evil_id)
+
+
+def _create_notes_in_child(base_dir: str, out_file: str, barrier, count: int) -> None:
+    """Child process: load the shared index, wait for the peer, then create notes."""
+    store = NoteStore(notes_dir=Path(base_dir))
+    store.ensure_directories()
+    barrier.wait(timeout=60)
+    created = [str(store.create(title=f"Note {i}", content="body").id) for i in range(count)]
+    Path(out_file).write_text(json.dumps(created))
+
+
+def _churn_index_in_child(base_dir: str, started, rounds: int) -> None:
+    """Child process: commit many changes to an index another process is reading."""
+    index = UUIDIndex(Path(base_dir))
+    index.load()
+    started.set()
+    for i in range(rounds):
+        note_id = uuid4()
+        index.add(note_id, index.notes_dir / f"churn-{i}-{note_id}.md")
+        if i % 2:
+            index.remove(note_id)
+
+
+def _fail(*args, **kwargs):
+    raise AssertionError("must not be called")
+
+
+class TestUUIDIndexSharedFile:
+    """Separate instances over one index file, as separate processes have."""
+
+    def _seeded(self, tmp_path: Path) -> tuple[Path, UUID]:
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        seed_id = uuid4()
+        UUIDIndex(tmp_path).add(seed_id, notes_dir / f"seed-{seed_id}.md")
+        return notes_dir, seed_id
+
+    def test_adds_from_stale_instances_both_survive(self, tmp_path):
+        """Regression (#68): the second save replaced the file with its own stale map."""
+        notes_dir, seed_id = self._seeded(tmp_path)
+        a, b = UUIDIndex(tmp_path), UUIDIndex(tmp_path)
+        a.load()
+        b.load()
+
+        x, y = uuid4(), uuid4()
+        a.add(x, notes_dir / f"x-{x}.md")
+        a.save()
+        b.add(y, notes_dir / f"y-{y}.md")
+        b.save()
+
+        assert set(_on_disk(tmp_path)) == {str(seed_id), str(x), str(y)}
+        fresh = UUIDIndex(tmp_path)
+        fresh.load()
+        assert fresh.get_path(x) == notes_dir / f"x-{x}.md"
+        assert fresh.get_path(y) == notes_dir / f"y-{y}.md"
+
+    def test_stale_instance_does_not_resurrect_removed_note(self, tmp_path):
+        """A peer's add must not write back an entry this instance removed."""
+        notes_dir, seed_id = self._seeded(tmp_path)
+        a, b = UUIDIndex(tmp_path), UUIDIndex(tmp_path)
+        a.load()
+        b.load()
+        assert a.exists(seed_id) and b.exists(seed_id)
+
+        y = uuid4()
+        a.remove(seed_id)
+        b.add(y, notes_dir / f"y-{y}.md")
+
+        assert _on_disk(tmp_path) == {str(y): f"y-{y}.md"}
+        fresh = UUIDIndex(tmp_path)
+        fresh.load()
+        assert not fresh.exists(seed_id)
+        assert fresh.get_path(y) == notes_dir / f"y-{y}.md"
+
+    def test_remove_reaches_entry_this_instance_never_saw(self, tmp_path):
+        """remove() works on the map on disk, not only on the in-memory view."""
+        notes_dir, seed_id = self._seeded(tmp_path)
+        stale = UUIDIndex(tmp_path)
+        stale.load()
+        x = uuid4()
+        UUIDIndex(tmp_path).add(x, notes_dir / f"x-{x}.md")
+
+        stale.remove(x)
+
+        assert _on_disk(tmp_path) == {str(seed_id): f"seed-{seed_id}.md"}
+
+
+class TestUUIDIndexFreshness:
+    """Lookups that miss pick up what other processes wrote, without a rebuild."""
+
+    @pytest.mark.parametrize("lookup", ["get_path", "get_relative_path", "get_uuid", "exists"])
+    def test_miss_loads_note_another_instance_added(self, tmp_path, monkeypatch, lookup):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        seed_id = uuid4()
+        writer = UUIDIndex(tmp_path)
+        writer.add(seed_id, notes_dir / f"seed-{seed_id}.md")
+        reader = UUIDIndex(tmp_path)
+        reader.load()
+        monkeypatch.setattr(reader, "rebuild", _fail)
+
+        note_id = uuid4()
+        path = notes_dir / f"later-{note_id}.md"
+        path.touch()
+        writer.add(note_id, path)
+
+        if lookup == "get_path":
+            assert reader.get_path(note_id) == path
+        elif lookup == "get_relative_path":
+            assert reader.get_relative_path(note_id) == path.name
+        elif lookup == "get_uuid":
+            assert reader.get_uuid(path) == note_id
+        else:
+            assert reader.exists(note_id)
+        # The reload kept the entries the reader already had
+        assert reader.exists(seed_id)
+
+    def test_store_reads_note_created_by_another_store(self, tmp_path, monkeypatch):
+        """Two NoteStores (two server processes) over one notes directory."""
+        store_a = NoteStore(notes_dir=tmp_path)
+        store_b = NoteStore(notes_dir=tmp_path)
+        store_a.create(title="Seed", content="seed")
+        store_b.ensure_directories()
+        monkeypatch.setattr(store_b.uuid_index, "rebuild", _fail)
+
+        note = store_a.create(title="Later", content="written by a")
+
+        assert store_b.read(note.id).title == "Later"
+
+    def test_hit_does_not_check_the_file(self, tmp_path, monkeypatch):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        note_id = uuid4()
+        path = notes_dir / f"note-{note_id}.md"
+        index = UUIDIndex(tmp_path)
+        index.add(note_id, path)
+        monkeypatch.setattr(index, "_reload_if_changed", _fail)
+
+        assert index.get_path(note_id) == path
+        assert index.get_relative_path(note_id) == path.name
+        assert index.get_uuid(path) == note_id
+        assert index.exists(note_id)
+
+    def test_miss_on_unchanged_file_does_not_reread(self, tmp_path, monkeypatch):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        note_id = uuid4()
+        index.add(note_id, notes_dir / f"note-{note_id}.md")
+        monkeypatch.setattr(index, "_read_file", _fail)
+
+        assert index.get_path(uuid4()) is None
+        assert index.get_uuid(notes_dir / "unknown.md") is None
+
+    def test_unreadable_version_is_not_reread_on_every_miss(self, tmp_path, monkeypatch):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        note_id = uuid4()
+        index.add(note_id, notes_dir / f"note-{note_id}.md")
+        index.index_path.write_text('{"uuid_paths": {')
+        real_read_file = index._read_file
+        reads = []
+
+        def counting_read_file():
+            reads.append(1)
+            return real_read_file()
+
+        monkeypatch.setattr(index, "_read_file", counting_read_file)
+
+        assert index.get_path(uuid4()) is None
+        assert index.get_path(uuid4()) is None
+        assert len(reads) == 1
+        # The in-memory map is kept
+        assert index.exists(note_id)
+
+    def test_move_by_another_instance_is_followed_without_rebuild(self, tmp_path, monkeypatch):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        note_id = uuid4()
+        old_path = notes_dir / f"old-{note_id}.md"
+        old_path.touch()
+        mover = UUIDIndex(tmp_path)
+        mover.add(note_id, old_path)
+        follower = UUIDIndex(tmp_path)
+        follower.load()
+
+        new_path = notes_dir / "moved" / f"new-{note_id}.md"
+        new_path.parent.mkdir()
+        old_path.rename(new_path)
+        mover.add(note_id, new_path)
+        monkeypatch.setattr(follower, "rebuild", _fail)
+
+        assert follower.rebuild_if_path_missing(note_id) is False
+        assert follower.get_path(note_id) == new_path
+
+
+class TestUUIDIndexAtomicWrite:
+    """The index file is only ever replaced whole."""
+
+    def test_writes_leave_only_the_index_and_its_lock(self, tmp_path):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        ids = [uuid4() for _ in range(3)]
+        for note_id in ids:
+            (notes_dir / f"note-{note_id}.md").touch()
+            index.add(note_id, notes_dir / f"note-{note_id}.md")
+        index.remove(ids[0])
+        index.rebuild()
+
+        assert sorted(p.name for p in (tmp_path / ".index").iterdir()) == [
+            INDEX_FILENAME,
+            f"{INDEX_FILENAME}.lock",
+        ]
+
+    def test_failed_write_cleans_up_and_is_retried_by_save(self, tmp_path, monkeypatch, caplog):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        seed_id = uuid4()
+        index.add(seed_id, notes_dir / f"seed-{seed_id}.md")
+        note_id = uuid4()
+        path = notes_dir / f"note-{note_id}.md"
+
+        def failing_replace(src, dst):
+            raise OSError("disk full")
+
+        with monkeypatch.context() as m, caplog.at_level(logging.ERROR):
+            m.setattr(os, "replace", failing_replace)
+            index.add(note_id, path)
+
+        assert "Failed to save UUID index" in caplog.text
+        assert list((tmp_path / ".index").glob("*.tmp")) == []
+        assert set(_on_disk(tmp_path)) == {str(seed_id)}
+        # Still served from memory
+        assert index.get_path(note_id) == path
+
+        index.save()
+
+        assert set(_on_disk(tmp_path)) == {str(seed_id), str(note_id)}
+        assert index._pending == []
+
+    def test_failed_change_is_written_by_the_next_change(self, tmp_path, monkeypatch):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        x, y = uuid4(), uuid4()
+
+        def failing_fsync(fd):
+            raise OSError("I/O error")
+
+        with monkeypatch.context() as m:
+            m.setattr(os, "fsync", failing_fsync)
+            index.add(x, notes_dir / f"x-{x}.md")
+        assert list((tmp_path / ".index").glob("*.tmp")) == []
+
+        index.add(y, notes_dir / f"y-{y}.md")
+
+        assert set(_on_disk(tmp_path)) == {str(x), str(y)}
+
+    def test_change_rewrites_a_corrupt_file(self, tmp_path):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        index = UUIDIndex(tmp_path)
+        x, y = uuid4(), uuid4()
+        index.add(x, notes_dir / f"x-{x}.md")
+        index.index_path.write_text('{"uuid_paths": {')
+
+        index.add(y, notes_dir / f"y-{y}.md")
+
+        assert set(_on_disk(tmp_path)) == {str(x), str(y)}
+
+
+class TestUUIDIndexMultiProcess:
+    """Real separate processes sharing one notes directory."""
+
+    def test_concurrent_note_creation_loses_nothing(self, tmp_path):
+        seed = NoteStore(notes_dir=tmp_path).create(title="Seed", content="seed")
+        barrier = _SPAWN.Barrier(2)
+        outputs = [tmp_path / f"created-{n}.json" for n in range(2)]
+        workers = [
+            _SPAWN.Process(
+                target=_create_notes_in_child, args=(str(tmp_path), str(out), barrier, 25)
+            )
+            for out in outputs
+        ]
+        try:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=120)
+            assert [worker.exitcode for worker in workers] == [0, 0]
+        finally:
+            for worker in workers:
+                if worker.is_alive():
+                    worker.kill()
+
+        created = [UUID(i) for out in outputs for i in json.loads(out.read_text())]
+        assert len(set(created)) == 50
+        fresh = UUIDIndex(tmp_path)
+        fresh.load()
+        assert fresh.count() == 51
+        for note_id in [seed.id, *created]:
+            path = fresh.get_path(note_id)
+            assert path is not None and path.exists()
+
+    def test_reader_never_sees_a_partial_file(self, tmp_path):
+        index_dir = tmp_path / ".index"
+        index_dir.mkdir()
+        # Large enough that a non-atomic rewrite takes several write() calls
+        entries = {str(uuid4()): f"category/note-{i}.md" for i in range(500)}
+        (index_dir / INDEX_FILENAME).write_text(json.dumps({"uuid_paths": entries}))
+        started = _SPAWN.Event()
+        writer = _SPAWN.Process(target=_churn_index_in_child, args=(str(tmp_path), started, 200))
+        failures = []
+        try:
+            writer.start()
+            assert started.wait(timeout=60)
+            while True:
+                alive = writer.is_alive()
+                try:
+                    data = json.loads((index_dir / INDEX_FILENAME).read_text(encoding="utf-8"))
+                    assert set(entries) <= set(data["uuid_paths"])
+                except ValueError as e:
+                    failures.append(e)
+                if not alive:
+                    break
+            writer.join(timeout=60)
+            assert writer.exitcode == 0
+        finally:
+            if writer.is_alive():
+                writer.kill()
+
+        assert failures == []

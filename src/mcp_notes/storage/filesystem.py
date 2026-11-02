@@ -1,14 +1,11 @@
 """Filesystem operations for notes with nested folder structure."""
 
-import fcntl
 import logging
 import os
 import re
 import shutil
-import tempfile
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -16,6 +13,8 @@ from uuid import UUID, uuid4
 from mcp_notes.constants import normalize_tag
 from mcp_notes.models import Note, NoteSummary
 from mcp_notes.settings import settings
+from mcp_notes.storage.fileops import atomic_write as _atomic_write
+from mcp_notes.storage.fileops import file_lock as _file_lock
 from mcp_notes.storage.parser import (
     ParsedNote,
     extract_inline_links,
@@ -66,88 +65,6 @@ def _read_note_prefix(path: Path) -> tuple[bytes, bool]:
     with path.open("rb") as f:
         data = f.read(limit + 1)
     return data[:limit], len(data) > limit
-
-
-def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
-    """
-    Atomically write content to a file using temp file + rename.
-
-    This prevents data corruption from concurrent writes or crashes mid-write.
-    The rename operation is atomic on POSIX systems.
-    """
-    # Create temp file in same directory (ensures same filesystem for atomic rename)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp", text=True)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())  # Ensure data is written to disk
-        # Atomic rename (POSIX guarantees atomicity for same-filesystem rename)
-        os.replace(tmp_path, path)
-    except Exception as e:
-        # Log the actual error before cleanup and re-raise
-        logger.warning(f"Atomic write failed for {path}: {e}")
-        # Clean up temp file on error
-        try:
-            os.unlink(tmp_path)
-        except OSError as cleanup_err:
-            logger.debug(f"Failed to clean up temp file {tmp_path}: {cleanup_err}")
-        raise
-
-
-@contextmanager
-def _file_lock(path: Path, timeout: float = 10.0):
-    """
-    Acquire an exclusive file lock for safe read-modify-write operations.
-
-    Uses POSIX flock() which is released automatically when the process exits
-    or the file descriptor is closed.
-
-    The lock file is created once and then left in place. ``flock`` is
-    associated with the inode, not with the pathname, so unlinking the file
-    does not release anybody's lock: a waiter that already opened it keeps its
-    lock on the now unreachable inode, while the next arrival creates a fresh
-    inode and takes an uncontended lock on that. Two holders, one note, and the
-    read-modify-write this lock exists to serialise runs concurrently. Lock
-    files are empty, and one accumulates per note UUID ever locked, including
-    notes since deleted, so leaving them costs nothing worth that risk.
-
-    An upgrade from a release that still unlinked is not made safe by keeping
-    the same pathname; it only avoids guaranteeing separation. A process
-    running the old code still unlinks the file out from under a new one.
-    Restart every server process to leave the mixed-version window.
-
-    Args:
-        path: Path to file to lock
-        timeout: Max seconds to wait for lock (raises TimeoutError if exceeded)
-
-    Yields:
-        None (lock is held while in context)
-    """
-    import time
-
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    start = time.monotonic()
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
-    try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break  # Lock acquired
-            except BlockingIOError:
-                if time.monotonic() - start > timeout:
-                    raise TimeoutError(
-                        f"Could not acquire lock on {path} within {timeout}s"
-                    ) from None
-                time.sleep(0.05)  # Brief sleep before retry
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
 
 
 class NoteNotFoundError(Exception):
@@ -447,7 +364,6 @@ class NoteStore:
 
         # Update UUID index
         self.uuid_index.add(note_id, path)
-        self.uuid_index.save()
 
         logger.info(f"Created note: {note_id} - {title} at {path}")
 
@@ -602,7 +518,6 @@ class NoteStore:
 
                 # Update index
                 self.uuid_index.add(note_id, new_path)
-                self.uuid_index.save()
 
                 logger.info(f"Moved note: {note_id} from {old_path} to {new_path}")
             else:
@@ -652,7 +567,6 @@ class NoteStore:
 
             # Remove from index
             self.uuid_index.remove(note_id)
-            self.uuid_index.save()
 
             # Cleanup empty folders
             self._cleanup_empty_folders(parent)
@@ -913,7 +827,6 @@ class NoteStore:
 
         # Update index
         self.uuid_index.add(note_id, new_path)
-        self.uuid_index.save()
 
         # Cleanup empty folders
         self._cleanup_empty_folders(old_path.parent)
