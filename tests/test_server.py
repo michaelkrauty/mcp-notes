@@ -714,8 +714,8 @@ class TestGetNoteLinks:
         )
 
         result = await get_note_links(created["id"])
-        # Should have outgoing, incoming, and broken keys
-        assert "outgoing" in result or "error" not in result
+        assert "error_code" not in result
+        assert result == {"outgoing": [], "incoming": [], "broken": []}
 
 
 @pytest.mark.usefixtures("offline_collection")

@@ -4,6 +4,8 @@ from uuid import uuid4
 
 import pytest
 
+from mcp_notes.storage.parser import parse_note
+
 from ..conftest import claim_notes_test_collection, delete_test_collection_sync
 
 # Git history and link resolution are the subject here, not the vector index.
@@ -128,8 +130,9 @@ class TestNoteVersioning:
         # Get history
         history = await get_note_history(note_id, limit=10)
 
-        # Should have multiple versions
-        assert isinstance(history, list)
+        # One creation commit and two update commits touch this note.
+        assert len(history) == 3
+        assert len({version["commit_sha"] for version in history}) == 3
 
     @pytest.mark.asyncio
     async def test_restore_version_invalid_uuid(self, versioned_notes_dir):
@@ -164,32 +167,35 @@ class TestNoteVersioning:
         from mcp_notes.server import (
             create_note,
             get_note_history,
+            read_note,
             restore_note_version,
             update_note,
         )
 
         # Create note with specific content
+        original_content = "Original content ABC123."
+        modified_content = "Modified content XYZ789."
         note = await create_note(
             title="Restore Test",
-            content="Original content ABC123.",
+            content=original_content,
         )
         note_id = note["id"]
 
         # Update to new content
-        await update_note(note_id=note_id, content="Modified content XYZ789.")
+        await update_note(note_id=note_id, content=modified_content)
+        modified = await read_note(note_id)
+        assert parse_note(modified["content"]).body == modified_content
 
         # Get history to find original version
         history = await get_note_history(note_id, limit=10)
+        assert len(history) == 2
+        old_version = history[-1]  # Oldest version is the creation commit.
+        assert old_version["message"] == "Create note: Restore Test"
+        result = await restore_note_version(note_id, old_version["commit_sha"])
 
-        if len(history) >= 2:
-            # Try to restore to first version
-            old_version = history[-1]  # Oldest version
-            if "sha" in old_version or "commit" in old_version:
-                version_id = old_version.get("sha") or old_version.get("commit")
-                result = await restore_note_version(note_id, version_id)
-
-                # Should succeed or fail gracefully
-                assert isinstance(result, dict)
+        assert "error_code" not in result
+        restored = await read_note(note_id)
+        assert parse_note(restored["content"]).body == original_content
 
 
 class TestNoteLinks:
@@ -296,8 +302,9 @@ class TestNoteLinks:
 
         result = await get_note_links(source["id"])
 
-        assert "outgoing" in result
-        # Should have outgoing link
+        assert {note["id"] for note in result["outgoing"]} == {target_id}
+        assert {note["id"] for note in result["incoming"]} == set()
+        assert set(result["broken"]) == set()
 
     @pytest.mark.asyncio
     async def test_get_links_with_broken(self, linked_notes_dir):
@@ -312,8 +319,9 @@ class TestNoteLinks:
 
         result = await get_note_links(note["id"])
 
-        assert "broken" in result
-        # Should detect broken link
+        assert {note["id"] for note in result["outgoing"]} == set()
+        assert {note["id"] for note in result["incoming"]} == set()
+        assert set(result["broken"]) == {"00000000-0000-0000-0000-000000000000"}
 
     @pytest.mark.asyncio
     async def test_get_links_with_backlinks(self, linked_notes_dir):
@@ -328,19 +336,20 @@ class TestNoteLinks:
         target_id = target["id"]
 
         # Create multiple notes linking to target
-        await create_note(
+        linker1 = await create_note(
             title="Linker 1",
             content=f"Link to [[{target_id}]].",
         )
-        await create_note(
+        linker2 = await create_note(
             title="Linker 2",
             content=f"Also links to [[{target_id}]].",
         )
 
         result = await get_note_links(target_id)
 
-        assert "incoming" in result
-        # Should have incoming links
+        assert {note["id"] for note in result["outgoing"]} == set()
+        assert {note["id"] for note in result["incoming"]} == {linker1["id"], linker2["id"]}
+        assert set(result["broken"]) == set()
 
 
 class TestOrphanNotes:
