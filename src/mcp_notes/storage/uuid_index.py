@@ -83,6 +83,10 @@ class UUIDIndex:
         # Changes applied in memory whose write failed; replayed by the next
         # transaction or save()
         self._pending: list[_Change] = []
+        # A rebuild whose scan is in memory but was never written. The next
+        # transaction scans again under the file lock instead of reading the
+        # stale file, and nothing replaces the in-memory map with that file.
+        self._rebuild_owed = False
         # Index file as of this instance's last load or write; None if unknown
         self._signature: _Signature | None = None
         # RLock for in-process safety (allows nested calls like rebuild_if_path_missing->rebuild).
@@ -125,16 +129,22 @@ class UUIDIndex:
 
         The map is re-read from disk while the lock is held, so changes other
         processes committed since this instance last looked are kept. If the
-        file is missing or unreadable, the in-memory map stands in for it. If
-        locking or writing fails, the changes are still applied in memory and
-        kept pending for the next transaction or save().
+        file is missing or unreadable, the in-memory map stands in for it. If a
+        rebuild is owed, the file is stale instead, so the filesystem is
+        scanned afresh under the lock and the changes apply on top of that. If
+        locking, scanning or writing fails, the changes are still applied in
+        memory and kept pending (and any owed rebuild stays owed) for the next
+        transaction or save().
         """
         with self._lock:
             changes = [*self._pending, *changes]
             try:
                 with file_lock(self.index_path):
-                    loaded = self._read_file()
-                    if loaded is None:
+                    if self._rebuild_owed:
+                        mapping, _ = self._scan()
+                        _apply_changes(mapping, changes)
+                        self._write(mapping)
+                    elif (loaded := self._read_file()) is None:
                         # Rewrite even if nothing changed, to restore a valid file
                         mapping = dict(self._index)
                         _apply_changes(mapping, changes)
@@ -152,6 +162,7 @@ class UUIDIndex:
                 self._pending = changes
             else:
                 self._pending = []
+                self._rebuild_owed = False
             self._index = mapping
 
     def _reload_if_changed(self) -> bool:
@@ -161,6 +172,11 @@ class UUIDIndex:
         Costs one stat when nothing changed. A missing or unreadable file
         leaves the in-memory map as it is, and an unreadable version is not
         read again until the file changes once more.
+
+        While a rebuild is owed the file is older than the in-memory scan and
+        is never adopted. A change to it means another process could just
+        write, so the owed rebuild is retried instead: at most once per
+        version of the file, never on every miss.
 
         Returns:
             True if a newer map was loaded
@@ -172,6 +188,10 @@ class UUIDIndex:
                 return False
             if current == self._signature:
                 return False
+            if self._rebuild_owed:
+                self._signature = current
+                self._commit([])
+                return not self._rebuild_owed
             loaded = self._read_file()
             if loaded is None:
                 self._signature = current
@@ -182,8 +202,16 @@ class UUIDIndex:
             return True
 
     def load(self) -> None:
-        """Load index from disk (thread-safe); empty if the file is missing or unreadable."""
+        """
+        Load index from disk (thread-safe); empty if the file is missing or unreadable.
+
+        While a rebuild is owed the file is stale, so the owed rebuild is
+        retried instead; if that fails too, the in-memory scan is kept.
+        """
         with self._lock:
+            if self._rebuild_owed:
+                self._commit([])
+                return
             loaded = self._read_file()
             mapping, self._signature = loaded if loaded else ({}, None)
             _apply_changes(mapping, self._pending)
@@ -192,13 +220,14 @@ class UUIDIndex:
 
     def save(self) -> None:
         """
-        Retry persisting changes whose earlier write failed (thread-safe).
+        Retry persisting changes or a rebuild whose earlier write failed (thread-safe).
 
         add(), remove() and rebuild() persist themselves, so this does nothing
-        unless one of those writes failed.
+        unless one of those writes failed. An owed rebuild is retried with a
+        fresh scan under the file lock, not by writing the old scan.
         """
         with self._lock:
-            if self._pending:
+            if self._pending or self._rebuild_owed:
                 self._commit([])
 
     def _scan(self) -> tuple[dict[str, str], int]:
@@ -239,8 +268,10 @@ class UUIDIndex:
         The filesystem is the source of truth: the scan replaces the whole map
         and any pending changes. It runs under the same file lock as every
         other change, so a change another process commits cannot fall between
-        the scan and the write and be lost. If the lock cannot be taken, the
-        scan still replaces the in-memory map but is not written.
+        the scan and the write and be lost. If the lock cannot be taken or the
+        write fails, the scan still replaces the in-memory map and the rebuild
+        stays owed: the next transaction or save() scans again under the lock
+        and writes that.
 
         Security: Symlinks are explicitly skipped to prevent path traversal attacks.
 
@@ -249,12 +280,14 @@ class UUIDIndex:
         """
         with self._lock:
             locked = False
+            written = False
             try:
                 with file_lock(self.index_path):
                     locked = True
                     mapping, count = self._scan()
                     try:
                         self._write(mapping)
+                        written = True
                     except OSError as e:
                         logger.error(f"Failed to save UUID index: {e}")
             except OSError as e:
@@ -263,6 +296,7 @@ class UUIDIndex:
                 logger.error(f"Failed to lock UUID index for rebuild: {e}")
                 mapping, count = self._scan()
             self._pending = []
+            self._rebuild_owed = not written
             self._index = mapping
             logger.info(f"Rebuilt UUID index: {count} notes indexed")
             return count

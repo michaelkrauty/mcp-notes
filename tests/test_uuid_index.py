@@ -4,6 +4,7 @@ import json
 import logging
 import multiprocessing
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -891,6 +892,16 @@ def _fail(*args, **kwargs):
     raise AssertionError("must not be called")
 
 
+def _failing_replace(src, dst):
+    raise OSError("disk full")
+
+
+@contextmanager
+def _unavailable_lock(path, timeout=10.0):
+    raise TimeoutError(f"Could not acquire lock on {path} within {timeout}s")
+    yield
+
+
 class TestUUIDIndexSharedFile:
     """Separate instances over one index file, as separate processes have."""
 
@@ -1136,6 +1147,124 @@ class TestUUIDIndexAtomicWrite:
         index.add(y, notes_dir / f"y-{y}.md")
 
         assert set(_on_disk(tmp_path)) == {str(x), str(y)}
+
+
+class TestUUIDIndexOwedRebuild:
+    """A rebuild whose lock or write failed is retried, never silently dropped."""
+
+    def _with_unindexed_note(self, tmp_path: Path) -> tuple[UUIDIndex, Path, UUID, UUID, Path]:
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(parents=True)
+        seed_id = uuid4()
+        seed_path = notes_dir / f"seed-{seed_id}.md"
+        seed_path.touch()
+        index = UUIDIndex(tmp_path)
+        index.add(seed_id, seed_path)
+        # A note file the index does not know about, e.g. restored by git
+        stray_id = uuid4()
+        stray_path = notes_dir / f"stray-{stray_id}.md"
+        stray_path.touch()
+        return index, notes_dir, seed_id, stray_id, stray_path
+
+    def test_failed_rebuild_write_survives_an_unrelated_add(self, tmp_path, monkeypatch):
+        """Regression: the next add re-read the stale file and dropped the rebuild's repair."""
+        index, notes_dir, seed_id, stray_id, stray_path = self._with_unindexed_note(tmp_path)
+        with monkeypatch.context() as m:
+            m.setattr(os, "replace", _failing_replace)
+            index.rebuild()
+        assert index.get_path(stray_id) == stray_path
+        assert set(_on_disk(tmp_path)) == {str(seed_id)}
+
+        other_id = uuid4()
+        other_path = notes_dir / f"other-{other_id}.md"
+        other_path.touch()
+        index.add(other_id, other_path)
+
+        assert index.get_path(stray_id) == stray_path
+        fresh = UUIDIndex(tmp_path)
+        fresh.load()
+        assert fresh.get_path(stray_id) == stray_path
+        assert fresh.get_path(other_id) == other_path
+        assert index._rebuild_owed is False
+
+    def test_failed_rebuild_write_is_retried_by_save_with_a_fresh_scan(self, tmp_path, monkeypatch):
+        index, notes_dir, seed_id, stray_id, stray_path = self._with_unindexed_note(tmp_path)
+        with monkeypatch.context() as m:
+            m.setattr(os, "replace", _failing_replace)
+            index.rebuild()
+        # The filesystem moves on before the retry, which must scan again
+        # rather than write the earlier scan
+        stray_path.unlink()
+        late_id = uuid4()
+        late_path = notes_dir / f"late-{late_id}.md"
+        late_path.touch()
+
+        index.save()
+
+        assert set(_on_disk(tmp_path)) == {str(seed_id), str(late_id)}
+        assert index.get_path(late_id) == late_path
+        assert index._rebuild_owed is False
+
+    def test_failed_rebuild_lock_is_retried_when_another_process_writes(
+        self, tmp_path, monkeypatch
+    ):
+        index, notes_dir, seed_id, stray_id, stray_path = self._with_unindexed_note(tmp_path)
+        with monkeypatch.context() as m:
+            m.setattr("mcp_notes.storage.uuid_index.file_lock", _unavailable_lock)
+            index.rebuild()
+        assert index._rebuild_owed is True
+        assert index.get_path(stray_id) == stray_path
+        # Another process, which never saw the stray note, writes the stale map
+        peer = UUIDIndex(tmp_path)
+        peer.load()
+        peer_id = uuid4()
+        peer_path = notes_dir / f"peer-{peer_id}.md"
+        peer_path.touch()
+        peer.add(peer_id, peer_path)
+        assert str(stray_id) not in _on_disk(tmp_path)
+
+        # The miss retries the owed rebuild instead of adopting the stale file
+        assert index.get_path(peer_id) == peer_path
+        assert index.get_path(stray_id) == stray_path
+        assert index._rebuild_owed is False
+        assert set(_on_disk(tmp_path)) == {str(seed_id), str(stray_id), str(peer_id)}
+
+    def test_stale_file_never_replaces_an_owed_rebuild(self, tmp_path, monkeypatch):
+        """While retries keep failing, a miss and load() both keep the in-memory scan."""
+        index, notes_dir, seed_id, stray_id, stray_path = self._with_unindexed_note(tmp_path)
+        with monkeypatch.context() as m:
+            m.setattr(os, "replace", _failing_replace)
+            index.rebuild()
+        peer = UUIDIndex(tmp_path)
+        peer.load()
+        peer_id = uuid4()
+        peer_path = notes_dir / f"peer-{peer_id}.md"
+        peer_path.touch()
+        peer.add(peer_id, peer_path)
+        real_commit = index._commit
+        retries = []
+
+        def counting_commit(changes):
+            retries.append(changes)
+            real_commit(changes)
+
+        monkeypatch.setattr(index, "_commit", counting_commit)
+
+        with monkeypatch.context() as m:
+            m.setattr(os, "replace", _failing_replace)
+            assert index.get_path(uuid4()) is None
+            assert index.get_path(stray_id) == stray_path
+            # One retry per version of the file, not one per miss
+            assert index.get_path(uuid4()) is None
+            assert len(retries) == 1
+            index.load()
+            assert index.get_path(stray_id) == stray_path
+            assert index._rebuild_owed is True
+
+        index.save()
+
+        assert set(_on_disk(tmp_path)) == {str(seed_id), str(stray_id), str(peer_id)}
+        assert index._rebuild_owed is False
 
 
 class TestUUIDIndexMultiProcess:
