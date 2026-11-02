@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.10] - 2026-11-01
+
+### Fixed
+
+- Versioning and link tests now check the behavior they describe (#96). The restore test looked for a `sha` or `commit` key that history entries never carry, so it ended without restoring anything; it now restores the creation commit by `commit_sha` and checks that the note body is back to the original. The history test asserts the three versions a create and two updates produce, the link tests assert the exact outgoing, incoming and broken sets, and the `get_note_links` structure test fails on an error response instead of passing. Each was checked against a deliberately broken tool. No runtime change.
+
 ## [1.3.9] - 2026-11-01
 
 ### Fixed
