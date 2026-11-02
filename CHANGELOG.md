@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.12] - 2026-11-01
+
+### Fixed
+
+- The UUID index no longer loses notes when several server processes share a notes directory (#68). Each process kept its own copy of `.index/uuid_paths.json` and rewrote the whole file from it, so a process that saved a stale copy dropped notes another process had just created, and could bring back a note another process had deleted. The dropped note's file stayed on disk but could not be read by UUID until a full rebuild, which nothing triggered. Every change to the index is now one transaction under a cross-process file lock: the current file is read again, only that change is applied, and the result is written atomically with a temporary file and a rename, so readers never see a half-written file either. A lookup that misses re-reads the file when it has changed, so a note created by another process is found without a rescan. Server processes still running an older release write the index without the lock, so restart all of them after upgrading.
+
 ## [1.3.11] - 2026-11-01
 
 ### Changed
