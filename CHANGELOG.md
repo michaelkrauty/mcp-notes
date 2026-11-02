@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.15] - 2026-11-02
+
+### Fixed
+
+- Moving or renaming a note no longer logs `Git mv failed, using add` at WARNING level (#103). The note file is always moved on disk before the move is committed, so the `git mv` that `commit_move` ran first could only fail, and every routine move, category change or rename paid for a failing git subprocess and a misleading warning. The rename is now staged directly when the file has already moved: the new path is added and the old one removed from the index if it is tracked. The resulting commit and its history are the same as before, and `git mv` still runs if a caller has not moved the file yet. A failure to remove the old path from the index is now reported as an error instead of committing the note at both paths.
+
 ## [1.3.14] - 2026-11-01
 
 ### Changed

@@ -1,5 +1,6 @@
 """Tests for MCP Notes server module."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -918,6 +919,102 @@ class TestMoveCategory:
         assert not repo.is_dirty(untracked_files=False), (
             f"working tree dirty after move: {repo.git.status('--short')}"
         )
+
+
+@pytest.mark.usefixtures("offline_collection")
+class TestNoteMoveGitCommit:
+    """An ordinary move, rename or category change commits a clean git rename.
+
+    The store moves the file before the git commit runs, so commit_move must
+    stage that rename directly rather than try ``git mv`` on a missing source
+    and log a warning on every move (issue #103).
+    """
+
+    BODY = "A line of note body that stays the same across the move.\n" * 10
+
+    @staticmethod
+    def _git_warnings(caplog):
+        return [
+            r
+            for r in caplog.records
+            if r.name == "mcp_notes.storage.git" and r.levelno >= logging.WARNING
+        ]
+
+    def _assert_one_rename_commit(self, caplog, commits_before, old_rel, new_rel):
+        repo = get_git().repo
+        assert repo is not None  # git is enabled in tests
+        assert len(list(repo.iter_commits())) == commits_before + 1
+        assert repo.head.commit.message.startswith("Move note: ")
+        diff = repo.git.diff_tree("-M", "--name-status", "-r", "HEAD~1", "HEAD")
+        status, src, dst = diff.split("\t")
+        assert status.startswith("R"), diff
+        assert (src, dst) == (old_rel, new_rel)
+        assert not repo.is_dirty(untracked_files=True), repo.git.status("--short")
+        assert self._git_warnings(caplog) == []
+        # The move was logged (so the warning check above is not vacuous).
+        assert any("Git commit (move)" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "changes", [{"category": "new"}, {"title": "Renamed"}], ids=["category", "title"]
+    )
+    async def test_update_commits_rename_without_warning(self, tmp_notes_dir, caplog, changes):
+        created = await create_note(title="N", content=self.BODY, category="old")
+        note_id = UUID(created["id"])
+        store = get_store()
+        old_path = store.get_note_path(note_id)
+        repo = get_git().repo
+        commits_before = len(list(repo.iter_commits()))
+
+        caplog.set_level(logging.DEBUG, logger="mcp_notes.storage.git")
+        updated = await update_note(created["id"], **changes)
+        assert "error_code" not in updated, updated
+
+        new_path = store.get_note_path(note_id)
+        assert new_path != old_path
+        base = get_git().base_dir
+        self._assert_one_rename_commit(
+            caplog,
+            commits_before,
+            str(old_path.relative_to(base)),
+            str(new_path.relative_to(base)),
+        )
+        # History follows the rename back to the commit made before the move.
+        history = await get_note_history(created["id"])
+        assert [v["message"] for v in history] == [
+            f"Move note: {changes.get('title', 'N')}",
+            "Create note: N",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_move_category_commits_rename_without_warning(
+        self, tmp_notes_dir, monkeypatch, caplog
+    ):
+        # Skip the embedding-backed reindex so the test is env independent.
+        monkeypatch.setattr(
+            "mcp_notes.tools.categories.get_indexer",
+            AsyncMock(return_value=AsyncMock()),
+        )
+        created = await create_note(title="N", content=self.BODY, category="old")
+        note_id = UUID(created["id"])
+        store = get_store()
+        old_path = store.get_note_path(note_id)
+        commits_before = len(list(get_git().repo.iter_commits()))
+
+        caplog.set_level(logging.DEBUG, logger="mcp_notes.storage.git")
+        result = await move_category("old", "new")
+        assert result["updated_count"] == 1
+
+        new_path = store.get_note_path(note_id)
+        base = get_git().base_dir
+        self._assert_one_rename_commit(
+            caplog,
+            commits_before,
+            str(old_path.relative_to(base)),
+            str(new_path.relative_to(base)),
+        )
+        history = await get_note_history(created["id"])
+        assert [v["message"] for v in history] == ["Move note: N", "Create note: N"]
 
 
 @pytest.mark.usefixtures("offline_collection")
