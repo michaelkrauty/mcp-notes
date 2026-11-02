@@ -36,6 +36,7 @@ from vector_core.storage.embedding_fragments import (
 )
 from vector_core.storage.embedding_migration import (
     CollectionGeneration,
+    current_embedding_binding,
     embedding_collection_lock,
 )
 from vector_core.storage.embedding_sources import stored_embedding_text
@@ -97,6 +98,10 @@ class NoteIndexer:
         self._operation_generation: ContextVar[tuple[object, CollectionGeneration] | None] = (
             ContextVar("notes_collection_generation", default=None)
         )
+        # Pinned by read_operation() when it reads without the collection lock.
+        self._read_generation: ContextVar[tuple[object, CollectionGeneration] | None] = ContextVar(
+            "notes_read_generation", default=None
+        )
 
     @property
     def global_vocab(self) -> GlobalVocabulary:
@@ -122,11 +127,19 @@ class NoteIndexer:
 
     @property
     def collection_name(self) -> str:
-        """Get the physical target captured by the current operation."""
-        binding = self._operation_generation.get()
-        if binding is not None and binding[0] is asyncio.current_task():
-            return binding[1].physical_name
+        """Get the physical target captured by the current operation or read."""
+        generation = self._pinned_generation()
+        if generation is not None:
+            return generation.physical_name
         return self.logical_collection_name
+
+    def _pinned_generation(self) -> CollectionGeneration | None:
+        """The generation the current task's locked operation, else its read, pinned."""
+        for pinned in (self._operation_generation, self._read_generation):
+            binding = pinned.get()
+            if binding is not None and binding[0] is asyncio.current_task():
+                return binding[1]
+        return None
 
     @property
     def logical_collection_name(self) -> str:
@@ -167,6 +180,54 @@ class NoteIndexer:
                 yield generation
             finally:
                 self._operation_generation.reset(token)
+
+    async def current_generation(self) -> CollectionGeneration | None:
+        """Return the generation this client is still bound to, without the lock.
+
+        vector-core's current_embedding_binding() confirms, without waiting
+        for the collection lock, that an earlier collection_operation() bound
+        this indexer's storage, logical collection and embedder, and that the
+        binding is still the active, verified generation. None leaves the
+        decision to the locked path: the client is unbound (its first
+        operation in a process) or its identity unresolved, the generation
+        was superseded or no longer verifies, or this process published it
+        and has not yet registered it with the vocabulary.
+        """
+        generation = await current_embedding_binding(
+            self.storage, self.logical_collection_name, self.embedder
+        )
+        if generation is None or (
+            generation.migrated and generation.physical_name not in _registered_generations
+        ):
+            return None
+        return generation
+
+    @asynccontextmanager
+    async def read_operation(self) -> AsyncIterator[CollectionGeneration]:
+        """Pin one physical target for a read, taking the lock only to bind.
+
+        A client already bound to the current generation reads it without the
+        collection lock (current_generation()), so the read does not wait for
+        a mutation in progress in this or another process; mutations still
+        serialize with each other under the lock. Otherwise this is exactly
+        collection_operation(): it waits for the lock, binds, migrates if
+        needed, registers a generation this process published and holds the
+        lock for the read. Never write inside a read operation.
+        """
+        pinned = self._pinned_generation()
+        if pinned is not None:
+            yield pinned
+            return
+        generation = await self.current_generation()
+        if generation is None:
+            async with self.collection_operation() as generation:
+                yield generation
+            return
+        token = self._read_generation.set((asyncio.current_task(), generation))
+        try:
+            yield generation
+        finally:
+            self._read_generation.reset(token)
 
     async def ensure_collection(self) -> None:
         """Ensure a compatible generation and its note payload indexes."""
@@ -983,8 +1044,12 @@ class NoteIndexer:
         return f"{NOTE_INDEX_VERSION}:{settings.max_chunk_chars}:{settings.section_overlap_chars}"
 
     async def get_status(self) -> IndexStatus:
-        """Report status for the compatible physical generation."""
-        async with self.collection_operation():
+        """Report status for the compatible physical generation.
+
+        A read: once this indexer is bound it does not wait for a mutation in
+        progress (read_operation()).
+        """
+        async with self.read_operation():
             return await self._get_status()
 
     async def _get_status(self) -> IndexStatus:

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.16] - 2026-11-02
+
+### Changed
+
+- Searches no longer wait for note mutations in progress. Every search, similar-note, fact and glossary search resolved its target through the collection operation that note tools hold for a whole mutation, including embedding the note's chunks, so a search in this or another server process waited for any create, update, delete or bulk rewrite in progress. Searches now use vector-core's lock-free binding check (`current_embedding_binding`) and read the generation they are already bound to without the lock while it is still the active, verified one. The first search in a process, a generation another process has published, and a generation this process migrated but has not yet registered with the vocabulary still go through the locked path, which binds, migrates or fails closed as before. Mutations keep holding the lock across their whole operation.
+- Pin vector-core to v1.12.0, which adds that check.
+
 ## [1.3.15] - 2026-11-02
 
 ### Fixed
