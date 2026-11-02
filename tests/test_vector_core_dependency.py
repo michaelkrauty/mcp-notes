@@ -29,10 +29,10 @@ def test_readme_install_example_uses_current_vector_core_pin() -> None:
     assert "mcp-notes.git@v1.0.0" not in readme
 
 
-def test_project_version_is_v1_3_12() -> None:
+def test_project_version_is_v1_3_13() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert pyproject["project"]["version"] == "1.3.12"
+    assert pyproject["project"]["version"] == "1.3.13"
 
 
 def test_runtime_version_matches_project_metadata() -> None:

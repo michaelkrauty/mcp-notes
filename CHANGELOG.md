@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.13] - 2026-11-01
+
+### Fixed
+
+- Regression tests now pin what keeps a deleted note out of the index when an update races the delete (#66). Every note tool holds the cross-process collection lock from before its service call until it returns, so a delete's index removal and file removal happen under one hold of that lock and no update in this or another process can read the note in between. The tests show a delete waiting for an update parked in its embedding, in one process and across two; show that an update arriving while a delete is in progress waits and then finds the note gone, and that the same sequence without the lock scope does bring the deleted note back; and check that the create, update, delete, restore, category move and tag rename and merge tools keep the lock across their service calls. No runtime change.
+
 ## [1.3.12] - 2026-11-01
 
 ### Fixed
