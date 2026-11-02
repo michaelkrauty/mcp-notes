@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.17] - 2026-11-02
+
+### Changed
+
+- Pin vector-core to v1.12.1. Its fix concerns vector-core's own glossary search path; note glossary searches already resolve their target through the lock-free path added in 1.3.16, so no behavior changes here.
+
 ## [1.3.16] - 2026-11-02
 
 ### Changed

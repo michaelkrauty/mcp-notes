@@ -628,7 +628,7 @@ wheels = [
 
 [[package]]
 name = "mcp-notes"
-version = "1.3.16"
+version = "1.3.17"
 source = { editable = "." }
 dependencies = [
     { name = "gitpython" },
@@ -665,8 +665,8 @@ requires-dist = [
     { name = "pydantic-settings", specifier = "~=2.0" },
     { name = "pyyaml", specifier = "~=6.0" },
     { name = "qdrant-client", specifier = "~=1.16.0" },
-    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.0" },
-    { name = "vector-core", extras = ["tokenizer"], marker = "extra == 'tokenizer'", git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.0" },
+    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.1" },
+    { name = "vector-core", extras = ["tokenizer"], marker = "extra == 'tokenizer'", git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.1" },
 ]
 provides-extras = ["tokenizer"]
 
@@ -1515,8 +1515,8 @@ wheels = [
 
 [[package]]
 name = "vector-core"
-version = "1.12.0"
-source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.0#6546b058fa4bd93d11fbf0309daec7c445eaff60" }
+version = "1.12.1"
+source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.12.1#9216509bdc1a9c8007a006b7e8d900342175b74b" }
 dependencies = [
     { name = "httpx" },
     { name = "pathspec" },
