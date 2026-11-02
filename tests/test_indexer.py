@@ -22,6 +22,8 @@ def ready_generation(monkeypatch):
         yield
 
     monkeypatch.setattr(NoteIndexer, "collection_operation", collection_operation)
+    # Reads try the lock-free binding check first; leave them on the stub.
+    monkeypatch.setattr(NoteIndexer, "current_generation", AsyncMock(return_value=None))
 
 
 class TestNoteIndexerInit:

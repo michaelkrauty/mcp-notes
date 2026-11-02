@@ -241,7 +241,20 @@ def mock_collection_mutation(monkeypatch):
 
 
 @pytest.fixture
-async def offline_collection(request, tmp_path, monkeypatch):
+def offline_identity_resolved() -> bool:
+    """Whether offline_collection's embedders resolve their identity for real.
+
+    By default resolve_identity() is mocked and the client never records a
+    resolved identity, so vector-core's lock-free binding check never
+    confirms a binding. A test module that overrides this fixture to return
+    True gets embedders whose real resolve_identity() probes the mocked
+    backend, as a bound server process does.
+    """
+    return False
+
+
+@pytest.fixture
+async def offline_collection(request, tmp_path, monkeypatch, offline_identity_resolved):
     """Back the tools' notes collection with an in-process stack, by opt-in.
 
     Binding the notes collection resolves the embedding identity with a real
@@ -298,7 +311,8 @@ async def offline_collection(request, tmp_path, monkeypatch):
             cache_namespace="offline",
             cache_path=tmp_path / "offline-embeddings.db",
         )
-        client.resolve_identity = AsyncMock(return_value=client.configured_identity())
+        if not offline_identity_resolved:
+            client.resolve_identity = AsyncMock(return_value=client.configured_identity())
         client._embed_prepared_batch = AsyncMock(
             side_effect=lambda texts: [[1.0] + [0.0] * (dimension - 1) for _ in texts]
         )

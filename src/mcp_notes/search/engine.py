@@ -123,7 +123,16 @@ class NoteSearchEngine:
         return False
 
     async def _ready_collection(self) -> str:
-        """Resolve once before embedding, retaining a physical query target."""
+        """Resolve once before embedding, retaining a physical query target.
+
+        The indexer shares this engine's storage and embedder, so the binding
+        its locked path makes is the one later searches confirm without the
+        collection lock: a search by an engine already bound to the current
+        generation does not wait for a note mutation in progress in this or
+        another process. The first search in a process, or one after another
+        client published a replacement, waits for the lock and binds there,
+        migrating or failing closed as before.
+        """
         await self._ensure_global_vocab()
         indexer = NoteIndexer(
             note_store=self.note_store,
@@ -131,8 +140,8 @@ class NoteSearchEngine:
             embedder=self.embedder,
             global_vocab=self.global_vocab,
         )
-        # A search can publish a migration; the operation registers it.
-        async with indexer.collection_operation() as generation:
+        # A search can publish a migration; the locked path registers it.
+        async with indexer.read_operation() as generation:
             return generation.physical_name
 
     async def _readable_collection(self) -> tuple[str, CircuitBreakerOpenError | None]:
