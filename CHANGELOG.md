@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.11] - 2026-11-01
+
+### Changed
+
+- Pin vector-core to v1.10.2, which makes fuzzy matching of query terms that are not in the vocabulary about a hundred times faster and stops it from resolving a term to one that no stored note contains any more. Note searches build their sparse query on the event loop, so every misspelled or unfamiliar word in a search used to block the server for a few hundred milliseconds; it now takes a few milliseconds. Search results are otherwise unchanged. vector-core now depends on `rapidfuzz`.
+
 ## [1.3.10] - 2026-11-01
 
 ### Fixed
